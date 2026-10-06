@@ -1,0 +1,84 @@
+# Opt-in configuration. It preserves the RCA API as the primary durable destination
+# and independently queues an additional copy for an upstream OTLP/HTTP collector.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://localhost:8080
+            - http://127.0.0.1:8080
+          allowed_headers: ["*"]
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+  resource/rca:
+    attributes:
+      - key: telemetry.ingest.gateway
+        value: rca-otel-gateway
+        action: upsert
+      - key: experiment.run_id
+        value: ${env:RCA_EXPERIMENT_RUN_ID}
+        action: upsert
+  batch:
+    timeout: 2s
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+
+exporters:
+  otlp_http/rca:
+    endpoint: ${env:RCA_API_OTLP_ENDPOINT}
+    compression: none
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 10000
+  otlp_http/upstream:
+    endpoint: ${env:OTEL_UPSTREAM_ENDPOINT}
+    compression: gzip
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 2000
+  debug:
+    verbosity: basic
+    sampling_initial: 2
+    sampling_thereafter: 500
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/rca, batch]
+      exporters: [otlp_http/rca, otlp_http/upstream, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/rca, batch]
+      exporters: [otlp_http/rca, otlp_http/upstream, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/rca, batch]
+      exporters: [otlp_http/rca, otlp_http/upstream, debug]

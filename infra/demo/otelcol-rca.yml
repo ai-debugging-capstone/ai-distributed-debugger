@@ -1,0 +1,81 @@
+# Final OpenTelemetry Demo Collector layer loaded by compose.rca.yaml.
+#
+# Demo services send to the Demo collector first so its redaction, resource
+# detection, span-metrics connector, and infrastructure scrapers remain active.
+# This layer forwards the resulting traces, metrics, and logs one way to the
+# TraceLens gateway. The filter makes the route loop-safe if somebody also uses
+# TraceLens' optional upstream fan-out back to the Demo collector.
+
+# docker_stats can see every container through the host Docker socket. Stamp
+# each data point with its Compose project for provenance. The receiver's
+# project-label mapping is not reliable enough to be the security boundary on
+# every Docker engine, so the filter below uses the exact container set from
+# the pinned OpenTelemetry Demo 3.1.0 core/full Compose profiles instead.
+receivers:
+  docker_stats:
+    container_labels_to_metric_labels:
+      com.docker.compose.project: docker.compose.project
+
+exporters:
+  otlp_http/tracelens:
+    endpoint: http://otel-gateway:4318
+    compression: gzip
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 10000
+
+processors:
+  filter/drop_tracelens_gateway_returns:
+    error_mode: ignore
+    traces:
+      span:
+        - resource.attributes["telemetry.ingest.gateway"] == "rca-otel-gateway"
+    metrics:
+      metric:
+        - resource.attributes["telemetry.ingest.gateway"] == "rca-otel-gateway"
+    logs:
+      log_record:
+        - resource.attributes["telemetry.ingest.gateway"] == "rca-otel-gateway"
+  filter/drop_foreign_docker_metrics:
+    error_mode: propagate
+    metrics:
+      datapoint:
+        # Container names are globally unique in Docker, making this a
+        # fail-closed allowlist even when Compose labels are not surfaced as
+        # data-point attributes by docker_stats. Keep this synchronized with
+        # the pinned Demo 3.1.0 compose.yaml and compose.full.yaml services.
+        - 'IsMatch(metric.name, "^container\\.") and resource.attributes["container.runtime"] == "docker" and not IsMatch(resource.attributes["container.name"], "^(accounting|ad|astronomy-db|cart|checkout|currency|email|flagd|flagd-ui|fraud-detection|frontend|frontend-proxy|image-provider|kafka|load-generator|otel-collector|payment|product-catalog|quote|recommendation|shipping|telemetry-docs|valkey-cart)$")'
+
+service:
+  pipelines:
+    traces:
+      processors:
+        - filter/drop_tracelens_gateway_returns
+        - resource_detection
+        - memory_limiter
+        - transform/sanitize_spans
+        - gen_ai_normalizer
+        - transform/redact_sensitive_data
+        - redaction
+      exporters: [debug, span_metrics, otlp_http/tracelens]
+    metrics:
+      processors:
+        - filter/drop_tracelens_gateway_returns
+        - filter/drop_foreign_docker_metrics
+        - resource_detection
+        - memory_limiter
+      exporters: [debug, otlp_http/tracelens]
+    logs:
+      processors:
+        - filter/drop_tracelens_gateway_returns
+        - resource_detection
+        - memory_limiter
+        - transform/sanitize_logs
+      exporters: [debug, otlp_http/tracelens]

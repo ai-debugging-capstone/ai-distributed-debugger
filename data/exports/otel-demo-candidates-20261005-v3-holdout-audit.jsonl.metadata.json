@@ -1,0 +1,428 @@
+{
+  "schema_version": 2,
+  "artifact": "data\\exports\\otel-demo-candidates-20261005-v3-holdout-audit.jsonl",
+  "manifest_uri": "data/exports/otel-demo-candidates-20261005-v3-holdout-audit.jsonl.metadata.json",
+  "sha256": "b04f9af1a7e84608f6618b9e4bb39a570f50071de3cfd8cb48f8becaea5b82de",
+  "records": 50,
+  "runs": 5,
+  "incidents": 5,
+  "positive_records": 8,
+  "unmatched_incidents": [],
+  "eligible_incidents": 5,
+  "skipped_unlabelled_candidates": 0,
+  "skipped_abstention_candidates": 3,
+  "source_shas": [
+    "dedc0178918e260823323b8d95005a8cb924b007"
+  ],
+  "selection": {
+    "include_run_ids": [
+      "0281b905-7a9f-43b3-97f2-d7368d845978",
+      "12f32149-e26d-40ae-9379-81970f79a8c1",
+      "16bfae6e-46c7-45b4-9b54-ee7772eda3e5",
+      "4fc172f3-61a4-4596-bf50-254a427b351f",
+      "60bcaebc-0aed-41cb-b8d1-f83a3a2a941a"
+    ],
+    "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+    "source_version": "3.1.0",
+    "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+    "include_active": false,
+    "training_eligible_only": true,
+    "reserved_run_excluded": true
+  },
+  "run_provenance": [
+    {
+      "run_id": "0281b905-7a9f-43b3-97f2-d7368d845978",
+      "name": "otel-demo-paymentFailure-0281b905",
+      "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "source_version": "3.1.0",
+      "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+      "seed": 2101,
+      "workload": "mixed-commerce",
+      "split": "train",
+      "started_at": "2026-10-04T21:08:46.527331Z",
+      "ended_at": "2026-10-04T21:13:55.388527Z",
+      "configuration": {
+        "flag": "paymentFailure",
+        "profile": "full",
+        "variant": "100%",
+        "acceptance": {
+          "top_k": 3,
+          "passed": true,
+          "derived": {
+            "feature_buckets": 792,
+            "dependency_edges": 615
+          },
+          "reasons": [],
+          "telemetry": {
+            "spans": 39003,
+            "log_records": 12559,
+            "metric_points": 30453
+          },
+          "checked_at": "2026-10-04T21:13:55.118778Z",
+          "incident_ids": [
+            "28a97077-218a-57f2-9db9-ec1bcbcc8aac"
+          ],
+          "candidate_count": 11,
+          "matched_candidate": {
+            "rank": 1,
+            "score": 0.8280973864344997,
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge",
+            "incident_id": "28a97077-218a-57f2-9db9-ec1bcbcc8aac",
+            "probability": 0.07857308982265188,
+            "model_version": "heuristic-v1"
+          },
+          "expected_candidate": {
+            "entity_id": "payment",
+            "entity_type": "service"
+          },
+          "expected_candidates": [
+            {
+              "entity_id": "payment",
+              "entity_type": "service"
+            },
+            {
+              "entity_id": "checkout->payment",
+              "entity_type": "dependency_edge"
+            }
+          ]
+        },
+        "capture_seed": 2101,
+        "capture_valid": true,
+        "fault_seconds": 120,
+        "seed_semantics": "capture_partition_seed",
+        "warmup_seconds": 130,
+        "actual_workload": "mixed-commerce",
+        "original_variant": "off",
+        "recovery_seconds": 40,
+        "training_eligible": true,
+        "reset_between_runs": true,
+        "reset_completed_at": "2026-10-04T21:08:46.527331Z",
+        "intended_scenario_exercise": "repeated-checkout",
+        "upstream_workload_rng_controlled": false
+      },
+      "environment": {
+        "runner": "demo_experiment.py",
+        "collector": "rca-otel-gateway",
+        "capture_seed": 2101,
+        "upstream_workload_rng": "uncontrolled",
+        "upstream_load_generator": "Locust 2.44.4",
+        "upstream_workload_rng_note": "The stock OpenTelemetry Demo Locust launcher has no supported seed option; concurrent request scheduling remains nondeterministic."
+      }
+    },
+    {
+      "run_id": "12f32149-e26d-40ae-9379-81970f79a8c1",
+      "name": "otel-demo-paymentFailure-12f32149",
+      "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "source_version": "3.1.0",
+      "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+      "seed": 2123,
+      "workload": "mixed-commerce",
+      "split": "test",
+      "started_at": "2026-10-04T21:41:35.592998Z",
+      "ended_at": "2026-10-04T21:46:44.318372Z",
+      "configuration": {
+        "flag": "paymentFailure",
+        "profile": "full",
+        "variant": "100%",
+        "acceptance": {
+          "top_k": 3,
+          "passed": true,
+          "derived": {
+            "feature_buckets": 837,
+            "dependency_edges": 647
+          },
+          "reasons": [],
+          "telemetry": {
+            "spans": 36598,
+            "log_records": 12017,
+            "metric_points": 32032
+          },
+          "checked_at": "2026-10-04T21:46:44.001918Z",
+          "incident_ids": [
+            "fc6cb800-49da-5430-8e67-70cd72d5222d"
+          ],
+          "candidate_count": 11,
+          "matched_candidate": {
+            "rank": 1,
+            "score": 0.8047605180541615,
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge",
+            "incident_id": "fc6cb800-49da-5430-8e67-70cd72d5222d",
+            "probability": 0.054457468034935015,
+            "model_version": "heuristic-v1"
+          },
+          "expected_candidate": {
+            "entity_id": "payment",
+            "entity_type": "service"
+          },
+          "expected_candidates": [
+            {
+              "entity_id": "payment",
+              "entity_type": "service"
+            },
+            {
+              "entity_id": "checkout->payment",
+              "entity_type": "dependency_edge"
+            }
+          ]
+        },
+        "capture_seed": 2123,
+        "capture_valid": true,
+        "fault_seconds": 120,
+        "seed_semantics": "capture_partition_seed",
+        "warmup_seconds": 130,
+        "actual_workload": "mixed-commerce",
+        "original_variant": "off",
+        "recovery_seconds": 40,
+        "training_eligible": true,
+        "reset_between_runs": true,
+        "reset_completed_at": "2026-10-04T21:41:35.592998Z",
+        "intended_scenario_exercise": "repeated-checkout",
+        "upstream_workload_rng_controlled": false
+      },
+      "environment": {
+        "runner": "demo_experiment.py",
+        "collector": "rca-otel-gateway",
+        "capture_seed": 2123,
+        "upstream_workload_rng": "uncontrolled",
+        "upstream_load_generator": "Locust 2.44.4",
+        "upstream_workload_rng_note": "The stock OpenTelemetry Demo Locust launcher has no supported seed option; concurrent request scheduling remains nondeterministic."
+      }
+    },
+    {
+      "run_id": "16bfae6e-46c7-45b4-9b54-ee7772eda3e5",
+      "name": "otel-demo-paymentUnreachable-16bfae6e",
+      "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "source_version": "3.1.0",
+      "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+      "seed": 2301,
+      "workload": "mixed-commerce",
+      "split": "train",
+      "started_at": "2026-10-04T22:19:00.786265Z",
+      "ended_at": "2026-10-04T22:24:10.763423Z",
+      "configuration": {
+        "flag": "paymentUnreachable",
+        "profile": "full",
+        "variant": "on",
+        "acceptance": {
+          "top_k": 3,
+          "passed": true,
+          "derived": {
+            "feature_buckets": 832,
+            "dependency_edges": 731
+          },
+          "reasons": [],
+          "telemetry": {
+            "spans": 42330,
+            "log_records": 13566,
+            "metric_points": 32160
+          },
+          "checked_at": "2026-10-04T22:24:10.608176Z",
+          "incident_ids": [
+            "939dd540-bc00-5110-8738-b46d84270ecc"
+          ],
+          "candidate_count": 10,
+          "matched_candidate": {
+            "rank": 1,
+            "score": 1.0,
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge",
+            "incident_id": "939dd540-bc00-5110-8738-b46d84270ecc",
+            "probability": 0.1634376923916409,
+            "model_version": "heuristic-v1"
+          },
+          "expected_candidate": {
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge"
+          },
+          "expected_candidates": [
+            {
+              "entity_id": "checkout->payment",
+              "entity_type": "dependency_edge"
+            }
+          ]
+        },
+        "capture_seed": 2301,
+        "capture_valid": true,
+        "fault_seconds": 120,
+        "seed_semantics": "capture_partition_seed",
+        "warmup_seconds": 130,
+        "actual_workload": "mixed-commerce",
+        "original_variant": "off",
+        "recovery_seconds": 40,
+        "training_eligible": true,
+        "reset_between_runs": true,
+        "reset_completed_at": "2026-10-04T22:19:00.786265Z",
+        "intended_scenario_exercise": "repeated-checkout",
+        "upstream_workload_rng_controlled": false
+      },
+      "environment": {
+        "runner": "demo_experiment.py",
+        "collector": "rca-otel-gateway",
+        "capture_seed": 2301,
+        "upstream_workload_rng": "uncontrolled",
+        "upstream_load_generator": "Locust 2.44.4",
+        "upstream_workload_rng_note": "The stock OpenTelemetry Demo Locust launcher has no supported seed option; concurrent request scheduling remains nondeterministic."
+      }
+    },
+    {
+      "run_id": "4fc172f3-61a4-4596-bf50-254a427b351f",
+      "name": "otel-demo-paymentUnreachable-4fc172f3",
+      "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "source_version": "3.1.0",
+      "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+      "seed": 2407,
+      "workload": "mixed-commerce",
+      "split": "holdout",
+      "started_at": "2026-10-05T14:57:21.529147Z",
+      "ended_at": "2026-10-05T15:02:29.531154Z",
+      "configuration": {
+        "flag": "paymentUnreachable",
+        "profile": "full",
+        "variant": "on",
+        "acceptance": {
+          "top_k": 3,
+          "passed": true,
+          "derived": {
+            "feature_buckets": 829,
+            "dependency_edges": 693
+          },
+          "reasons": [],
+          "telemetry": {
+            "spans": 42276,
+            "log_records": 13501,
+            "metric_points": 31928
+          },
+          "checked_at": "2026-10-05T15:02:29.405246Z",
+          "incident_ids": [
+            "9e1913e0-1dfd-511d-9d47-d35c572187ae"
+          ],
+          "candidate_count": 10,
+          "matched_candidate": {
+            "rank": 1,
+            "score": 0.9999997795202018,
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge",
+            "incident_id": "9e1913e0-1dfd-511d-9d47-d35c572187ae",
+            "probability": 0.9999997795202018,
+            "model_version": "champion-portable-linear-sha256:1df99581e825"
+          },
+          "expected_candidate": {
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge"
+          },
+          "expected_candidates": [
+            {
+              "entity_id": "checkout->payment",
+              "entity_type": "dependency_edge"
+            }
+          ]
+        },
+        "capture_seed": 2407,
+        "capture_valid": true,
+        "fault_seconds": 120,
+        "seed_semantics": "capture_partition_seed",
+        "warmup_seconds": 130,
+        "actual_workload": "mixed-commerce",
+        "original_variant": "off",
+        "recovery_seconds": 40,
+        "training_eligible": true,
+        "reset_between_runs": true,
+        "reset_completed_at": "2026-10-05T14:57:21.529147Z",
+        "intended_scenario_exercise": "repeated-checkout",
+        "upstream_workload_rng_controlled": false
+      },
+      "environment": {
+        "runner": "demo_experiment.py",
+        "collector": "rca-otel-gateway",
+        "capture_seed": 2407,
+        "upstream_workload_rng": "uncontrolled",
+        "upstream_load_generator": "Locust 2.44.4",
+        "upstream_workload_rng_note": "The stock OpenTelemetry Demo Locust launcher has no supported seed option; concurrent request scheduling remains nondeterministic."
+      }
+    },
+    {
+      "run_id": "60bcaebc-0aed-41cb-b8d1-f83a3a2a941a",
+      "name": "otel-demo-paymentFailure-60bcaebc",
+      "source_repository": "https://github.com/open-telemetry/opentelemetry-demo.git",
+      "source_version": "3.1.0",
+      "source_sha": "dedc0178918e260823323b8d95005a8cb924b007",
+      "seed": 2113,
+      "workload": "mixed-commerce",
+      "split": "validation",
+      "started_at": "2026-10-04T21:34:22.772937Z",
+      "ended_at": "2026-10-04T21:39:33.182446Z",
+      "configuration": {
+        "flag": "paymentFailure",
+        "profile": "full",
+        "variant": "100%",
+        "acceptance": {
+          "top_k": 3,
+          "passed": true,
+          "derived": {
+            "feature_buckets": 837,
+            "dependency_edges": 643
+          },
+          "reasons": [],
+          "telemetry": {
+            "spans": 39011,
+            "log_records": 12597,
+            "metric_points": 32393
+          },
+          "checked_at": "2026-10-04T21:39:32.873324Z",
+          "incident_ids": [
+            "466b4545-075b-561e-a121-fb5ec851e65d"
+          ],
+          "candidate_count": 11,
+          "matched_candidate": {
+            "rank": 1,
+            "score": 0.8446349837567572,
+            "entity_id": "checkout->payment",
+            "entity_type": "dependency_edge",
+            "incident_id": "466b4545-075b-561e-a121-fb5ec851e65d",
+            "probability": 0.0810401851111992,
+            "model_version": "heuristic-v1"
+          },
+          "expected_candidate": {
+            "entity_id": "payment",
+            "entity_type": "service"
+          },
+          "expected_candidates": [
+            {
+              "entity_id": "payment",
+              "entity_type": "service"
+            },
+            {
+              "entity_id": "checkout->payment",
+              "entity_type": "dependency_edge"
+            }
+          ]
+        },
+        "capture_seed": 2113,
+        "capture_valid": true,
+        "fault_seconds": 120,
+        "seed_semantics": "capture_partition_seed",
+        "warmup_seconds": 130,
+        "actual_workload": "mixed-commerce",
+        "original_variant": "off",
+        "recovery_seconds": 40,
+        "training_eligible": true,
+        "reset_between_runs": true,
+        "reset_completed_at": "2026-10-04T21:34:22.772937Z",
+        "intended_scenario_exercise": "repeated-checkout",
+        "upstream_workload_rng_controlled": false
+      },
+      "environment": {
+        "runner": "demo_experiment.py",
+        "collector": "rca-otel-gateway",
+        "capture_seed": 2113,
+        "upstream_workload_rng": "uncontrolled",
+        "upstream_load_generator": "Locust 2.44.4",
+        "upstream_workload_rng_note": "The stock OpenTelemetry Demo Locust launcher has no supported seed option; concurrent request scheduling remains nondeterministic."
+      }
+    }
+  ],
+  "provenance_sha256": "4ea9e72ca80c54a34d908cc7baa61103dc8cb794993293a08dbf2d4e66f59eba",
+  "created_at": "2026-10-05T15:04:05.329478Z"
+}

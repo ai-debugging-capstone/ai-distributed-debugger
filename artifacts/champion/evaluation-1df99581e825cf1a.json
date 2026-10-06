@@ -1,0 +1,111 @@
+{
+  "backend": "portable-linear",
+  "seed": 2301,
+  "feature_profile": "compact",
+  "feature_schema": [
+    "baseline_inverse_rank",
+    "baseline_probability",
+    "baseline_score",
+    "candidate_is_dependency_edge",
+    "candidate_is_service"
+  ],
+  "run_counts": {
+    "train": 2,
+    "validation": 1,
+    "test": 1,
+    "holdout": 0
+  },
+  "validation": {
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "hit_at_5": 1.0,
+    "mrr": 1.0,
+    "ndcg_at_3": 0.9197207891481876,
+    "ndcg_at_5": 0.9197207891481876,
+    "map_at_5": 0.8333333333333333,
+    "brier": 5.1780023096254014e-08,
+    "ece": 0.0002275522425647658,
+    "risk_coverage": [
+      {
+        "threshold": 0.3,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.5,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.7,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.9,
+        "coverage": 1.0,
+        "risk": 0.0
+      }
+    ],
+    "examples": 1
+  },
+  "test": {
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "hit_at_5": 1.0,
+    "mrr": 1.0,
+    "ndcg_at_3": 0.9197207891481876,
+    "ndcg_at_5": 0.9197207891481876,
+    "map_at_5": 0.8333333333333333,
+    "brier": 6.7100364862917196e-06,
+    "ece": 0.0025903738120764963,
+    "risk_coverage": [
+      {
+        "threshold": 0.3,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.5,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.7,
+        "coverage": 1.0,
+        "risk": 0.0
+      },
+      {
+        "threshold": 0.9,
+        "coverage": 1.0,
+        "risk": 0.0
+      }
+    ],
+    "examples": 1
+  },
+  "holdout": {
+    "hit_at_1": 0.0,
+    "hit_at_3": 0.0,
+    "hit_at_5": 0.0,
+    "mrr": 0.0,
+    "ndcg_at_3": 0.0,
+    "ndcg_at_5": 0.0,
+    "map_at_5": 0.0,
+    "brier": 0.0,
+    "ece": 0.0,
+    "examples": 0
+  },
+  "run_membership": {
+    "train": [
+      "0281b905-7a9f-43b3-97f2-d7368d845978",
+      "16bfae6e-46c7-45b4-9b54-ee7772eda3e5"
+    ],
+    "validation": [
+      "60bcaebc-0aed-41cb-b8d1-f83a3a2a941a"
+    ],
+    "test": [
+      "12f32149-e26d-40ae-9379-81970f79a8c1"
+    ],
+    "holdout": []
+  }
+}
