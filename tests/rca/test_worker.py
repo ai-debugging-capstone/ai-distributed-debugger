@@ -104,6 +104,48 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertFalse(is_unprocessed_bucket(None, newer, watermarks))
         self.assertTrue(is_unprocessed_bucket(None, newer + timedelta(seconds=10), watermarks))
 
+    def test_worker_establishes_repeatable_read_before_advisory_lock(self) -> None:
+        statements: list[str] = []
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def execute(self, query, params=None):
+                statements.append(" ".join(query.split()))
+
+            def fetchone(self):
+                return {"acquired": False}
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def execute(self, query):
+                statements.append(" ".join(query.split()))
+
+            def cursor(self):
+                return Cursor()
+
+        worker = RCAWorker(WorkerSettings("postgresql://unused"))
+        with patch.object(worker, "_connect", return_value=Connection()):
+            processed = worker.run_once()
+
+        self.assertEqual(processed, 0)
+        self.assertEqual(
+            statements,
+            [
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                "SELECT pg_try_advisory_xact_lock(%s) AS acquired",
+            ],
+        )
+
     def test_lifecycle_policy_keeps_unscoped_live_detection_and_fails_unknown_run_closed(self) -> None:
         self.assertEqual(
             incident_processing_mode(None, None, has_active_incident=False), "detect"

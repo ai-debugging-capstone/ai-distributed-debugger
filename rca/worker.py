@@ -164,6 +164,12 @@ class RCAWorker:
 
     def run_once(self) -> int:
         with self._connect(self.settings.database_url) as connection:
+            # Keep watermark discovery and raw-data fetches on one snapshot.  Under
+            # READ COMMITTED, a historical run committed between _raw_start() and
+            # _fetch_raw() can be seen only through the already-selected live-data
+            # window, causing its newest bucket to become a watermark that skips
+            # every older bucket permanently.
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             # Avoid two replicas materializing the same interval concurrently.
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_try_advisory_xact_lock(%s) AS acquired", (0x52434131,))
