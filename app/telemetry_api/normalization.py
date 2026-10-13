@@ -226,6 +226,8 @@ def normalize_trace_request(request: Any) -> tuple[list[dict[str, Any]], list[di
                         raise ValueError("span end time precedes start time")
                     attributes = key_values_to_dict(span.attributes)
                     parent_span_id = bytes_to_hex(span.parent_span_id)
+                    if parent_span_id is not None and len(parent_span_id) != 16:
+                        raise ValueError("parent_span_id must contain 8 bytes")
                     record = {
                         "trace_id": trace_id,
                         "span_id": span_id,
@@ -328,6 +330,8 @@ def normalize_metric_request(request: Any) -> tuple[list[dict[str, Any]], list[d
                         maximum: float | None = None
                         if metric_type in {"gauge", "sum"}:
                             value = _number_value(point)
+                            if value is None:
+                                raise ValueError("numeric metric point must contain a value")
                         elif metric_type in {"histogram", "exponential_histogram"}:
                             count = int(point.count)
                             total = _optional_scalar(point, "sum")
@@ -368,7 +372,11 @@ def normalize_metric_request(request: Any) -> tuple[list[dict[str, Any]], list[d
                             "observed_at": observed_at,
                             "raw": raw,
                         }
-                        record["idempotency_key"] = idempotency_key(record)
+                        # The receiver clock is a storage fallback, not source identity.
+                        identity = dict(record)
+                        if not point.time_unix_nano:
+                            identity["time_unix"] = None
+                        record["idempotency_key"] = idempotency_key(identity)
                         records.append(record)
                     except Exception as exc:
                         rejected.append(
@@ -406,6 +414,12 @@ def normalize_log_request(request: Any) -> tuple[list[dict[str, Any]], list[dict
             for log_record in scope_logs.log_records:
                 try:
                     attributes = key_values_to_dict(log_record.attributes)
+                    trace_id = bytes_to_hex(log_record.trace_id)
+                    span_id = bytes_to_hex(log_record.span_id)
+                    if trace_id is not None and len(trace_id) != 32:
+                        raise ValueError("trace_id must contain 16 bytes")
+                    if span_id is not None and len(span_id) != 16:
+                        raise ValueError("span_id must contain 8 bytes")
                     observed_time = nanos_to_datetime(
                         int(log_record.observed_time_unix_nano), fallback=received_at
                     )
@@ -419,14 +433,19 @@ def normalize_log_request(request: Any) -> tuple[list[dict[str, Any]], list[dict
                         "severity_number": int(log_record.severity_number),
                         "severity_text": log_record.severity_text or None,
                         "body": _body_to_text(log_record.body),
-                        "trace_id": bytes_to_hex(log_record.trace_id),
-                        "span_id": bytes_to_hex(log_record.span_id),
+                        "trace_id": trace_id,
+                        "span_id": span_id,
                         "attributes": attributes,
                         "resource_attributes": resource_attributes,
                         "run_id": _extract_run_id(attributes, resource_attributes),
                         "raw": _message_to_dict(log_record),
                     }
-                    record["idempotency_key"] = idempotency_key(record)
+                    identity = dict(record)
+                    if not log_record.time_unix_nano:
+                        identity["time_unix"] = None
+                    if not log_record.observed_time_unix_nano:
+                        identity["observed_time"] = None
+                    record["idempotency_key"] = idempotency_key(identity)
                     records.append(record)
                 except Exception as exc:
                     rejected.append(

@@ -396,6 +396,20 @@ Important design documents:
 - [`docs/PRODUCT_REQUIREMENTS.md`](docs/PRODUCT_REQUIREMENTS.md)
 - [`docs/DATASET_AND_EVALUATION.md`](docs/DATASET_AND_EVALUATION.md)
 
+## Automated tests
+
+See [docs/TESTING.md](docs/TESTING.md) for Windows setup, unit/component commands,
+and real PostgreSQL integration tests using disposable databases. From the
+repository root, the offline suite is:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -c pytest.ini -m "not postgres"
+```
+
+Run both offline and PostgreSQL tests before each subsequent milestone. Database
+tests require explicit opt-in; a default run that skips them does not establish
+real persistence. These tests verify integration, not root-cause accuracy.
+
 ## Operations
 
 Follow logs:
