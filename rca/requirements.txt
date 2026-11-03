@@ -1,3 +1,4 @@
-# Live worker dependency. The analytics, replay, synthetic generator, and portable
-# champion use only the Python standard library.
+# Existing free causal-analysis engine and PostgreSQL worker dependency.
+# DoWhy is MIT-licensed and runs locally; no hosted API or LLM is used.
+dowhy==0.14
 psycopg[binary]>=3.2,<4

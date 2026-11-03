@@ -10,7 +10,7 @@ import signal
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from itertools import groupby
 from typing import Any
@@ -71,6 +71,7 @@ class WorkerSettings:
     min_history_buckets: int = 10
     min_incident_buckets: int = 2
     model_path: str | None = None
+    analysis_engine: str = "dowhy"
 
     @classmethod
     def from_env(cls) -> WorkerSettings:
@@ -83,6 +84,7 @@ class WorkerSettings:
             min_history_buckets=int(os.environ.get("RCA_MIN_HISTORY_BUCKETS", "10")),
             min_incident_buckets=int(os.environ.get("RCA_MIN_INCIDENT_BUCKETS", "2")),
             model_path=os.environ.get("RCA_MODEL_PATH") or None,
+            analysis_engine=os.environ.get("RCA_ANALYSIS_ENGINE", "dowhy").strip().lower(),
         )
 
 
@@ -106,6 +108,8 @@ class RCAWorker:
             raise ValueError("DATABASE_URL or --database-url is required")
         if settings.lookback_buckets < settings.min_history_buckets:
             raise ValueError("lookback must be at least min_history")
+        if settings.analysis_engine not in {"dowhy", "champion", "heuristic"}:
+            raise ValueError("analysis_engine must be dowhy, champion, or heuristic")
         self.settings = settings
         self.scorer = StreamingAnomalyScorer(
             lookback=settings.lookback_buckets,
@@ -113,16 +117,24 @@ class RCAWorker:
         )
         self.detector = IncidentDetector(min_consecutive=settings.min_incident_buckets)
         baseline_ranker = HeuristicRootCauseRanker()
-        champion = load_champion_artifact(settings.model_path, logger=LOGGER)
-        self.ranker = (
-            ChampionRerankingRootCauseRanker(
-                champion,
-                baseline=baseline_ranker,
-                logger=LOGGER,
+        if settings.analysis_engine == "dowhy":
+            from .dowhy_engine import DoWhyRootCauseRanker
+
+            self.ranker = DoWhyRootCauseRanker(logger=LOGGER)
+        elif settings.analysis_engine == "champion":
+            champion = load_champion_artifact(settings.model_path, logger=LOGGER)
+            self.ranker = (
+                ChampionRerankingRootCauseRanker(
+                    champion,
+                    baseline=baseline_ranker,
+                    logger=LOGGER,
+                )
+                if champion is not None
+                else baseline_ranker
             )
-            if champion is not None
-            else baseline_ranker
-        )
+        else:
+            self.ranker = baseline_ranker
+        LOGGER.info("Configured RCA analysis engine: %s", settings.analysis_engine)
         self._primed = False
         self._recent_anomalies: dict[str | None, list[AnomalyResult]] = defaultdict(list)
         self._recent_edges: dict[str | None, list[DependencyEdge]] = defaultdict(list)
@@ -221,22 +233,40 @@ class RCAWorker:
                     edges_by_bucket.get((run_id, bucket_start), ()),
                 )
                 results = [self.scorer.score(bucket) for bucket in current]
+                self._observe_ranker(results)
                 processed_times.add(bucket_start)
                 for result in results:
                     self._write_feature(connection, result)
                 lifecycle = lifecycles.get(run_id)
                 mode, events = self._incident_events_for_lifecycle(results, lifecycle)
                 for event in events:
-                    incident = self._persist_incident(connection, event)
+                    incident = event.incident
+                    # Establish identity before provider caches/metadata use it.
+                    self._identify_incident(incident)
+                    decision = None
                     if mode == "detect" and event.action in {"opened", "updated"}:
                         decision = self.ranker.rank(
                             incident,
                             self._recent_anomalies[run_id],
                             graph,
                         )
+                        selected = decision.actionable_rankings or decision.rankings
+                        if selected:
+                            incident.metadata["analysis_model_version"] = selected[0].model_version
+                    # Providers add their provenance, assumptions, or fallback
+                    # reason during ranking. Persist that completed diagnosis.
+                    self._persist_incident(connection, event)
+                    if decision is not None:
                         self._replace_rankings(connection, incident, decision.rankings)
             connection.commit()
             return len(processed_times)
+
+    def _observe_ranker(self, results: Sequence[AnomalyResult]) -> None:
+        """Feed provider baseline history independently of incident lifecycle."""
+
+        observe = getattr(self.ranker, "observe", None)
+        if callable(observe):
+            observe(results)
 
     def _dependency_graph_at(
         self,
@@ -379,7 +409,7 @@ class RCAWorker:
                    request_count, error_count, error_rate,
                    latency_ms_p50, latency_ms_p95, latency_ms_p99,
                    cpu_percent, memory_bytes, log_error_count,
-                   features, missingness,
+                   features, missingness, anomaly_score, onset_score,
                    ROW_NUMBER() OVER (
                      PARTITION BY run_id, entity_type, entity_id ORDER BY bucket_start DESC
                    ) AS history_rank
@@ -389,7 +419,10 @@ class RCAWorker:
             ORDER BY run_id NULLS FIRST, bucket_start, entity_id
         """
         with connection.cursor() as cursor:
-            cursor.execute(query, (self.settings.lookback_buckets,))
+            history_limit = max(self.settings.lookback_buckets, 300) if (
+                self.settings.analysis_engine == "dowhy"
+            ) else self.settings.lookback_buckets
+            cursor.execute(query, (history_limit,))
             for row in cursor.fetchall():
                 features = dict(row.get("features") or {})
                 for name in (
@@ -408,7 +441,15 @@ class RCAWorker:
                     features=features,
                     missingness=dict(row.get("missingness") or {}),
                 )
-                self.scorer.score(bucket)
+                result = self.scorer.score(bucket)
+                # Scorer priming starts cold; preserve previously observed
+                # anomaly scores when deciding what can fit a healthy baseline.
+                observed = replace(
+                    result,
+                    score=float(row.get("anomaly_score", result.score)),
+                    onset_score=float(row.get("onset_score", result.onset_score)),
+                )
+                self._observe_ranker([observed])
 
     def _fetch_raw(
         self, connection: Any, start: datetime, cutoff: datetime
@@ -487,24 +528,31 @@ class RCAWorker:
                 ),
             )
 
-    def _persist_incident(self, connection: Any, event: IncidentEvent) -> Incident:
-        incident = event.incident
+    @staticmethod
+    def _identify_incident(incident: Incident) -> None:
         # A replay/restart must identify the same incident, not generate duplicates.
         incident.id = str(uuid5(NAMESPACE_URL, f"rca:{incident.run_id}:{incident.started_at.isoformat()}:{incident.trigger_entity}"))
+
+    def _persist_incident(self, connection: Any, event: IncidentEvent) -> Incident:
+        incident = event.incident
+        self._identify_incident(incident)
         with connection.cursor() as cursor:
             cursor.execute(
                 """INSERT INTO incidents
                    (id,run_id,status,started_at,detected_at,ended_at,severity,summary,trigger_entity,
-                    max_anomaly,affected_entities,metadata)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    max_anomaly,affected_entities,model_version,metadata)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                    ON CONFLICT (id) DO UPDATE SET
                      run_id=EXCLUDED.run_id, status=EXCLUDED.status, ended_at=EXCLUDED.ended_at, severity=EXCLUDED.severity,
                      summary=EXCLUDED.summary, max_anomaly=EXCLUDED.max_anomaly,
-                     affected_entities=EXCLUDED.affected_entities, metadata=EXCLUDED.metadata""",
+                     affected_entities=EXCLUDED.affected_entities,
+                     model_version=EXCLUDED.model_version, metadata=EXCLUDED.metadata""",
                 (
                     incident.id, incident.run_id, incident.status, incident.started_at, incident.detected_at,
                     incident.ended_at, incident.severity, incident.summary, incident.trigger_entity,
-                    incident.max_anomaly, incident.affected_entities, _json({**incident.metadata, "run_id": incident.run_id}),
+                    incident.max_anomaly, incident.affected_entities,
+                    incident.metadata.get("analysis_model_version"),
+                    _json({**incident.metadata, "run_id": incident.run_id}),
                 ),
             )
         return incident
@@ -515,9 +563,14 @@ class RCAWorker:
             cursor.execute("DELETE FROM candidate_rankings WHERE incident_id=%s", (incident.id,))
             inserted: list[tuple[Any, int]] = []
             for ranking in rankings:
-                online_features = dict(ranking.online_features) or dict(
-                    online_candidate_record(incident, ranking)["features"]
-                )
+                if ranking.model_version.startswith("dowhy-gcm-"):
+                    # External attributions are not heuristic candidate scores
+                    # and must not masquerade as supervised-ranker features.
+                    online_features = {}
+                else:
+                    online_features = dict(ranking.online_features) or dict(
+                        online_candidate_record(incident, ranking)["features"]
+                    )
                 cursor.execute(
                     """INSERT INTO candidate_rankings
                        (incident_id,rank,entity_type,entity_id,score,probability,fault_class,confidence,
@@ -573,9 +626,14 @@ class RCAWorker:
         runbook = cursor.fetchone()
         if not runbook:
             return
+        measure = (
+            f"attribution score={ranking.score:.3f} (not a probability)"
+            if ranking.probability is None
+            else f"probability={ranking.probability:.3f}"
+        )
         rationale = (
             f"Selected {runbook['title']} for rank-{ranking.rank} {ranking.entity_type} "
-            f"{ranking.entity_id}; class={ranking.fault_class}, probability={ranking.probability:.3f}."
+            f"{ranking.entity_id}; class={ranking.fault_class}, {measure}."
         )
         cursor.execute(
             """INSERT INTO recommendations
@@ -599,6 +657,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--min-history-buckets", type=int, default=defaults.min_history_buckets)
     parser.add_argument("--min-incident-buckets", type=int, default=defaults.min_incident_buckets)
     parser.add_argument("--model-path", default=defaults.model_path)
+    parser.add_argument(
+        "--analysis-engine", choices=("dowhy", "champion", "heuristic"),
+        default=defaults.analysis_engine,
+    )
     parser.add_argument("--once", action="store_true", default=os.environ.get("RCA_ONCE") == "1")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
@@ -616,6 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_history_buckets=args.min_history_buckets,
             min_incident_buckets=args.min_incident_buckets,
             model_path=args.model_path,
+            analysis_engine=args.analysis_engine,
         )
     )
     if args.check:

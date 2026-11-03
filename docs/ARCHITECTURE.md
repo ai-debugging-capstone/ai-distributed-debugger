@@ -24,7 +24,9 @@ flowchart LR
     API --> Raw[(Normalized telemetry)]
     Raw --> Analytics[Analytics worker]
     Analytics --> Context[Incident context + temporal graph]
-    Context --> Ranker[RCA ranker]
+    Context --> Ranker[DoWhy GCM latency attribution]
+    Ranker -->|unsupported or insufficient data| Fallback[Heuristic diagnosis]
+    Fallback --> Evidence
     Ranker --> Evidence[Evidence + runbook selection]
     Evidence --> ReadModels[(Incident read models)]
     ReadModels --> Grafana[Grafana]
@@ -74,19 +76,33 @@ with `RCA_MIN_INCIDENT_BUCKETS`.
 
 ### Root-cause engine
 
-Candidates can be a service, service instance, dependency edge, database,
-queue, cache, host, external workload, or `no_fault`. Ranking uses temporal
-precedence, topology, anomaly magnitude, path coverage, signal quality, and
-learned incident patterns.
+`RCA_ANALYSIS_ENGINE=dowhy` selects the existing MIT-licensed DoWhy GCM
+implementation for latency attribution. The adapter observes warm-up and incident
+buckets, selects aligned healthy observations strictly before incident onset,
+and fits DoWhy's built-in causal mechanisms. No experiment label or injected
+fault identity enters this fit.
 
-The always-available ranker is transparent and deterministic. The currently
-deployable learned path is a tabular candidate re-ranker trained from exact
-online feature snapshots. A numeric temporal Transformer plus edge-aware graph
-attention forward architecture exists as research code, but it is not yet a
-trainable or deployable challenger: sequence/graph export, loss/training,
-serialization, and worker inference integration remain future work. Promotion
-is an explicit reviewed action after held-out metrics are inspected; checksum
-and lifecycle guards do not substitute for a quality-regression gate.
+For synchronous latency propagation, a dependency's latency influences its
+caller, so the service-call arrows are reversed. The adapter uses the target
+service's causal ancestor subgraph and refuses unsupported topology, cycles,
+missing observations, insufficient history, and unsupported incident types.
+These restrictions are explicit modeling assumptions; an observed call graph
+does not establish causal sufficiency.
+
+Successful results store signed causal attribution scores and supporting
+context, with `probability=NULL`. The selected incident's
+`metadata.analysis` records the provider, execution status, reason, target,
+baseline sample count, and assumptions. The actual engine/version is retained
+on the incident and candidates. A heuristic fallback keeps its own version and
+records why DoWhy could not analyze the incident.
+
+The heuristic ranks observable services and dependency edges using temporal
+precedence, anomaly magnitude, path coverage, and data quality. The separately
+selectable `champion` mode retains the historical tabular candidate re-ranker.
+Its manual promotion and checksum guards remain available for comparison.
+Transformer/graph-attention forward code is research scaffolding; completing
+that training/deployment pipeline is outside the DoWhy integration. See
+[the integration contract](DOWHY_INTEGRATION.md).
 
 ### Evidence and runbooks
 
@@ -118,9 +134,11 @@ Main storage groups:
 - Rejected records and per-signal freshness are visible in Grafana.
 - Missing modalities are represented explicitly; missing values are never
   silently interpreted as healthy zeros.
-- If no candidate exceeds calibrated confidence, the result is
-  `inconclusive` and the dashboard presents the evidence for manual debugging.
-- The heuristic ranker remains available if a model artifact cannot load.
+- Insufficient evidence produces an explicit inconclusive or fallback result;
+  the dashboard shows the actual engine and the reason. Attribution scores are
+  not converted into probabilities.
+- The heuristic remains available if DoWhy cannot analyze the input or a
+  separately selected tabular artifact cannot load.
 - Neither model inference nor Grafana is on the application's request path.
 
 ## Trust boundaries

@@ -4,6 +4,10 @@ TraceLens RCA is a dependency-aware debugging system for distributed application
 It consumes OpenTelemetry traces, metrics, and logs, detects sustained incidents,
 reconstructs the dependency path active during each incident, ranks likely root
 causes, and presents the evidence and a reviewed debugging runbook in Grafana.
+The default analysis engine integrates the free, MIT-licensed **DoWhy GCM**
+library for supported latency incidents. Existing statistical detection and
+heuristic diagnosis remain available when causal attribution is not applicable.
+No paid service, API key, or LLM is required.
 
 PostgreSQL is the durable store behind the system. It is deliberately not the
 center of the product: the product is the analysis loop that turns telemetry into
@@ -28,14 +32,14 @@ Normalized event-time telemetry in PostgreSQL
 Feature windows + observed dependency graph
         |
         v
-Persistent incident detector
+Sustained incident detector
         |
         v
-Candidate generation and root-cause ranking
+Existing DoWhy GCM latency attribution
         |
-        +---- deterministic evidence ranker (always available)
-        +---- trained tabular champion
-        +---- temporal Transformer + graph-attention challenger
+        +---- healthy baseline + reviewed latency causal assumptions
+        +---- explicit heuristic fallback for unsupported/insufficient data
+        +---- optional tabular champion for comparison
         |
         v
 Evidence, uncertainty, runbook, and developer feedback
@@ -64,6 +68,16 @@ and it never performs remediation automatically.
 The local detector requires two consecutive closed 10-second abnormal buckets
 by default. That filters one-off spikes without losing short bursts from
 low-traffic dependencies; `RCA_MIN_INCIDENT_BUCKETS` remains configurable.
+
+For an observed synchronous dependency slowdown, DoWhy fits its built-in causal
+mechanisms to healthy observations before the incident and attributes abnormal
+target latency to contributing components. It requires an acyclic latency graph
+and aligned observations; call direction is reversed to express how dependency
+latency affects its caller. A failed or unsupported analysis is recorded as a
+fallback with a reason, never as a DoWhy diagnosis. Signed attribution values are
+not probabilities or proof of causation. See
+[`docs/DOWHY_INTEGRATION.md`](docs/DOWHY_INTEGRATION.md) for assumptions, limits,
+configuration, and verification.
 
 ## Product surfaces
 
@@ -111,6 +125,12 @@ Wait until `rca-db`, `rca-api`, `rca-worker`, `otel-gateway`, and `grafana` are
 healthy. Then open Grafana and sign in with `admin` / `admin` unless you changed
 the values in `.env`.
 
+`RCA_ANALYSIS_ENGINE=dowhy` is the default. Set it to `heuristic` for the
+deterministic comparison or `champion` for the historical tabular model, then
+recreate `rca-worker` with `docker compose up -d --build rca-worker`. The dashboard
+shows the engine that actually produced the selected incident's candidates,
+including a fallback reason when DoWhy did not run.
+
 ### 2. Run the self-contained smoke experiment
 
 PowerShell:
@@ -129,6 +149,17 @@ The script sends a healthy baseline followed by a labeled failure episode. The
 worker should open an incident and persist ranked candidates, evidence, a graph,
 and an applicable runbook. This is the fastest way to prove the complete product
 path before running the larger microservice demo.
+
+To verify the DoWhy library directly with a controlled latency experiment, run:
+
+```powershell
+python -m pip install -r rca/requirements.txt
+python scripts/dowhy_smoke.py
+```
+
+This check exercises external causal attribution without requiring Docker. It
+does not establish accuracy on the real OpenTelemetry Demo; that requires fresh
+fault captures evaluated independently of whether a diagnosis succeeds.
 
 ### 3. Use the pinned OpenTelemetry Demo testbed
 
@@ -185,7 +216,12 @@ The mounted flag file is applied by flagd's live file watcher. The runner does
 not restart flagd at fault boundaries, avoiding a second outage that would
 contaminate the causal ranking.
 
-### 5. Export a leakage-safe dataset and train a baseline
+### 5. Optional: export a dataset and train the tabular comparison
+
+DoWhy uses its existing causal-analysis implementations and fits healthy
+system-specific observations at runtime. The following pipeline trains the
+separate historical tabular ranker; it is not required to enable DoWhy. Select
+`RCA_ANALYSIS_ENGINE=champion` explicitly to deploy that comparison.
 
 Only completed runs with explicit labels are exported. Candidate features come
 from the online diagnosis that existed before the label was joined; runs remain
@@ -234,13 +270,14 @@ lock. When scikit-learn is available, omit
 `--portable` to train the optional scikit-learn tabular implementation; its runtime image
 must also include the optional ML dependencies before a pickle is selected.
 The numeric temporal Transformer and edge-aware graph-attention forward
-architecture lives in `rca/models.py`, but it is research scaffolding rather
-than the deployed model path: the current dataset exporter, trainer,
-serialization, and worker integration are tabular. Neither path uses an LLM.
+architecture lives in `rca/models.py` as separate research scaffolding, with no
+trained checkpoint or deployment path. The comparison dataset exporter,
+trainer, and serialization remain tabular; DoWhy uses its own numerical causal
+mechanisms. Neither path uses an LLM.
 Promotion is manual after evaluation review; registry lifecycle and checksum
 validation intentionally do not pretend to be an automatic quality gate.
 
-The worker verifies the selected artifact, records a checksum-derived model
+In `champion` mode the worker verifies the selected artifact, records a checksum-derived model
 version in every decision, and falls back to `heuristic-v1` if loading or
 inference fails. Only load pickle artifacts produced and reviewed inside this
 project. Dataset and model files are immutable by checksum, so use a new output
@@ -253,6 +290,9 @@ selector is frozen into the metadata sidecar and PostgreSQL snapshot record, so
 a later training result can be traced to the precise set of real captures.
 
 ## Verified real-data snapshot
+
+The results below belong to the earlier heuristic/tabular pipeline. They are
+preserved as historical evidence and are **not DoWhy evaluation results**.
 
 The checked-in real-data snapshot was captured from the full OpenTelemetry Demo
 `3.1.0` deployment at commit
@@ -286,7 +326,7 @@ engineer actually asks them:
 2. **Where did it begin?** The onset timeline compares anomalies across services
    and edges.
 3. **What is most likely responsible?** A ranked candidate table includes entity
-   type, failure mechanism, score, calibrated confidence, model version, and
+   type, failure mechanism, score semantics, analysis engine/version, and
    abstention state.
 4. **Why is it ranked there?** Evidence panels show observed values, baselines,
    deviations, traces, affected paths, and contradicting signals.
@@ -329,15 +369,16 @@ The canonical OTLP endpoints are also mounted at `/v1/traces`, `/v1/metrics`, an
 Telemetry is aligned into event-time buckets. Robust baselines use the median and
 median absolute deviation, with explicit cold-start and missingness indicators.
 An incident opens only after anomaly conditions persist for the configured number
-of buckets. Nearby symptoms that are connected in the observed dependency graph
-are grouped into one incident instead of producing an alert storm.
+of buckets. The current detector groups sustained symptoms within one experiment
+run; separating unrelated concurrent faults remains future work.
 
 ### Dependency understanding
 
-The graph is derived from real span parent/child relationships and peer/resource
-attributes. Nodes include services, instances, PostgreSQL, Kafka, Valkey, hosts,
-external load, and a `no_fault` option. Directed edges retain request volume,
-errors, latency, protocol, freshness, and the trace paths on which they appeared.
+The graph is derived from span parent/child relationships and peer/resource
+attributes. Its primary nodes are observed services and named dependencies such
+as PostgreSQL or Kafka. Directed edges retain request volume, errors, latency,
+protocol, and observation windows. This call graph supplies context, not proof
+of a causal relationship.
 
 ### Root-cause ranking
 
@@ -351,12 +392,13 @@ The baseline ranker combines:
 - resource saturation and queue signals; and
 - telemetry quality and missingness.
 
-This deterministic ranker is the safe fallback and the explanation anchor. The
-first learned champion is a compact tabular classifier/ranker trained from fault
-injection runs. The research challenger is a numeric temporal Transformer for
-within-entity history plus edge-aware graph attention for cross-entity context.
-It is not a language model, does not consume source code or prompts, and must beat
-the champion on held-out experiment runs before promotion.
+The default engine integrates DoWhy GCM for numerical latency attribution using
+healthy pre-incident samples and a bounded, acyclic dependency model. The
+deterministic ranker above provides explicit fallback for errors-only or resource
+incidents, unsuitable graphs, missing observations, and cold starts. The
+historical compact tabular champion remains an explicit comparison mode.
+Transformer/graph-attention code is research scaffolding and is not used by the
+DoWhy integration. No engine consumes prompts or calls an LLM.
 
 ### Evaluation without leakage
 
@@ -367,9 +409,13 @@ entity/mechanism. Ground truth is isolated from online features.
 
 Splits are performed by complete experiment run—not by individual telemetry row—
 so adjacent windows from the same fault cannot leak across training and test
-sets. Reports include Hit@1, Hit@3, mean reciprocal rank, false incidents per
-healthy hour, detection delay, calibration error, abstention coverage, robustness
-under missing signals, and per-fault-family performance.
+sets. Ranking and calibration metric functions exist; false incidents per healthy
+hour, detection delay, robustness under missing signals, and per-fault-family
+performance remain evaluation requirements, not completed measurements. DoWhy
+attribution scores are not calibrated probabilities. The existing capture
+acceptance gate selects successful top-3 diagnoses, so its accepted runs alone
+cannot establish an unbiased success rate. Evaluation must retain failed
+diagnoses and healthy controls as well.
 
 The complete scenario catalog is in
 [`experiments/otel-demo-v3.1.0.yaml`](experiments/otel-demo-v3.1.0.yaml).
@@ -395,6 +441,7 @@ Important design documents:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/PRODUCT_REQUIREMENTS.md`](docs/PRODUCT_REQUIREMENTS.md)
 - [`docs/DATASET_AND_EVALUATION.md`](docs/DATASET_AND_EVALUATION.md)
+- [`docs/DOWHY_INTEGRATION.md`](docs/DOWHY_INTEGRATION.md)
 
 ## Operations
 
@@ -424,7 +471,8 @@ dashboard state and is therefore intentionally not part of the normal commands.
 
 - TraceLens is advisory: developers choose and execute remediation.
 - Runbooks are versioned reviewed records, not generated instructions.
-- Model confidence is calibrated and the system may abstain.
+- Scores retain their engine-specific meaning; DoWhy attribution has no
+  calibrated probability and the system may abstain or record a fallback.
 - The target demo database and TraceLens database are separate failure domains.
 - Collector retry plus idempotent storage protects against transient delivery
   failures.

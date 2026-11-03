@@ -108,7 +108,8 @@ class CandidateRanking:
     entity_id: str
     rank: int
     score: float
-    probability: float
+    # Attribution engines return signed contributions, not probabilities.
+    probability: float | None
     confidence: str
     fault_class: str
     evidence_summary: str

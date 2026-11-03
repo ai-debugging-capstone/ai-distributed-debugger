@@ -22,7 +22,7 @@
       }
     ]
   },
-  "description": "Evidence-first incident detection and dependency-aware root-cause analysis for OpenTelemetry systems.",
+  "description": "DoWhy latency attribution, identified heuristic fallback, and evidence-backed debugging for OpenTelemetry systems.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -101,23 +101,20 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
-      "description": "Highest calibrated probability for the selected incident.",
+      "description": "Raw signed DoWhy attribution or the selected engine's ranking score. This value is not a probability or an accuracy percentage.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
-          "decimals": 0,
+          "decimals": 3,
           "mappings": [],
-          "max": 100,
-          "min": 0,
+          "noValue": "n/a",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 50 },
-              { "color": "green", "value": 75 }
+              { "color": "blue", "value": null }
             ]
           },
-          "unit": "percent"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -140,11 +137,11 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE(round(100 * probability)::double precision, 0) AS value FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 1",
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT score AS value FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) AND entity_id <> 'inconclusive' ORDER BY rank LIMIT 1",
           "refId": "A"
         }
       ],
-      "title": "Top-cause confidence",
+      "title": "Top attribution / ranking score",
       "type": "stat"
     },
     {
@@ -273,7 +270,7 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
-      "description": "Currently promoted ranking model. A deterministic heuristic is shown when no learned champion exists.",
+      "description": "Engine that actually produced the selected incident's diagnosis. Fallback status is shown when the requested DoWhy analysis could not run.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "fixed", "fixedColor": "purple" },
@@ -300,11 +297,11 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE((SELECT model_version FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 1), (SELECT name || ' · ' || version FROM model_versions WHERE status = 'champion' ORDER BY trained_at DESC LIMIT 1), 'heuristic · baseline') AS value",
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE(i.model_version, (SELECT cr.model_version FROM candidate_rankings cr WHERE cr.incident_id = i.id ORDER BY cr.rank LIMIT 1), 'awaiting analysis') || COALESCE(' · ' || (i.metadata -> 'analysis' ->> 'status'), '') AS value FROM incidents i WHERE i.id = (SELECT id FROM selected)",
           "refId": "A"
         }
       ],
-      "title": "Active model",
+      "title": "Diagnosis engine",
       "type": "stat"
     },
     {
@@ -334,7 +331,7 @@
           },
           {
             "matcher": { "id": "byName", "options": "probability" },
-            "properties": [{ "id": "unit", "value": "percentunit" }, { "id": "decimals", "value": 0 }]
+            "properties": [{ "id": "unit", "value": "percentunit" }, { "id": "decimals", "value": 0 }, { "id": "noValue", "value": "n/a" }]
           }
         ]
       },
@@ -361,11 +358,12 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
-      "description": "Ranked causal entities. Confidence is calibrated; low-confidence results should be treated as investigative leads.",
+      "description": "DoWhy returns signed causal attributions with no probability. Historical/fallback engines have different score semantics; all results are investigative leads and no probability calibration is established.",
       "fieldConfig": {
         "defaults": {
           "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
           "mappings": [],
+          "noValue": "n/a",
           "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
         },
         "overrides": [
@@ -374,7 +372,7 @@
             "properties": [
               { "id": "unit", "value": "percentunit" },
               { "id": "decimals", "value": 0 },
-              { "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "gauge" } },
+              { "id": "custom.cellOptions", "value": { "type": "auto" } },
               { "id": "min", "value": 0 },
               { "id": "max", "value": 1 }
             ]
@@ -395,7 +393,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT rank, entity_type AS type, entity_id AS candidate, fault_class, probability, confidence, round(score::numeric, 3) AS score, evidence_summary AS explanation FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 15",
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT rank, entity_type AS type, entity_id AS candidate, fault_class, round(score::numeric, 3) AS \"attribution / ranking score\", CASE WHEN model_version LIKE 'dowhy-gcm-%' THEN 'signed causal attribution' ELSE 'engine-specific ranking score' END AS score_kind, probability, confidence, model_version AS engine, evidence_summary AS explanation FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 15",
           "refId": "A"
         }
       ],
@@ -460,7 +458,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT occurred_at AS time, evidence_type AS type, entity_id AS entity, signal_name AS signal, value, baseline, contribution, summary FROM evidence_items WHERE incident_id = (SELECT id FROM selected) ORDER BY occurred_at NULLS LAST, contribution DESC NULLS LAST LIMIT 100",
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT occurred_at AS time, evidence_type AS type, entity_id AS entity, signal_name AS signal, value, baseline, contribution, summary, details::text AS analysis_details FROM evidence_items WHERE incident_id = (SELECT id FROM selected) ORDER BY occurred_at NULLS LAST, contribution DESC NULLS LAST LIMIT 100",
           "refId": "A"
         }
       ],
@@ -616,7 +614,7 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
-      "description": "Human feedback closes the learning loop without changing the current incident result.",
+      "description": "Stored human review for later evaluation. Feedback does not automatically retrain an engine or alter the current diagnosis.",
       "fieldConfig": {
         "defaults": {
           "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
@@ -746,7 +744,7 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
-      "description": "Champion/challenger registry and held-out evaluation metadata.",
+      "description": "Optional tabular comparison models and historical held-out metadata. This registry does not imply that the current incident used a tabular model or that DoWhy has been evaluated on those runs.",
       "fieldConfig": {
         "defaults": {
           "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true },
@@ -773,7 +771,7 @@
           "refId": "A"
         }
       ],
-      "title": "Model registry",
+      "title": "Tabular comparison model registry",
       "type": "table"
     },
     {
@@ -806,6 +804,39 @@
         }
       ],
       "title": "Dataset & experiment lineage",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Requested provider, actual execution status, target, baseline samples, and limitations for the selected incident. A fallback result is never labeled as a successful DoWhy analysis.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "cellOptions": { "type": "auto", "wrapText": true }, "inspect": true },
+          "mappings": [],
+          "noValue": "n/a",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 61 },
+      "id": 19,
+      "options": {
+        "cellHeight": "md",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE(i.metadata -> 'analysis' ->> 'provider', 'historical / unspecified') AS requested_provider, COALESCE(i.metadata -> 'analysis' ->> 'status', 'not recorded') AS analysis_status, COALESCE(i.model_version, (SELECT cr.model_version FROM candidate_rankings cr WHERE cr.incident_id = i.id ORDER BY cr.rank LIMIT 1)) AS actual_engine, i.metadata -> 'analysis' ->> 'reason' AS reason, i.metadata -> 'analysis' ->> 'target' AS target, i.metadata -> 'analysis' ->> 'baseline_samples' AS baseline_samples, (i.metadata -> 'analysis')::text AS assumptions_and_details FROM incidents i WHERE i.id = (SELECT id FROM selected)",
+          "refId": "A"
+        }
+      ],
+      "title": "Analysis engine, fallback & assumptions",
       "type": "table"
     }
   ],
@@ -841,6 +872,6 @@
   "timezone": "browser",
   "title": "Telemetry RCA · Incident Command Center",
   "uid": "rca-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

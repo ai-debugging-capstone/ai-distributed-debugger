@@ -6,7 +6,7 @@ import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rca.domain import (
     AnomalyResult,
@@ -15,6 +15,8 @@ from rca.domain import (
     FeatureBucket,
     Incident,
 )
+from rca.incidents import IncidentEvent
+from rca.ranking import RankerDecision
 from rca.worker import (
     RCAWorker,
     RunLifecycle,
@@ -57,6 +59,7 @@ class WorkerConfigurationTests(unittest.TestCase):
                 "RCA_MIN_HISTORY_BUCKETS": "8",
                 "RCA_MIN_INCIDENT_BUCKETS": "3",
                 "RCA_MODEL_PATH": "artifacts/champion/model.json",
+                "RCA_ANALYSIS_ENGINE": "heuristic",
             },
             clear=False,
         ):
@@ -66,6 +69,7 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(settings.lookback_buckets, 40)
         self.assertEqual(settings.min_incident_buckets, 3)
         self.assertEqual(settings.model_path, "artifacts/champion/model.json")
+        self.assertEqual(settings.analysis_engine, "heuristic")
 
     def test_deployed_incident_threshold_matches_code_default(self) -> None:
         with patch.dict(
@@ -94,6 +98,136 @@ class WorkerConfigurationTests(unittest.TestCase):
             RCAWorker(WorkerSettings(""))
         with self.assertRaises(ValueError):
             RCAWorker(WorkerSettings("postgresql://x", lookback_buckets=2, min_history_buckets=6))
+        with self.assertRaises(ValueError):
+            RCAWorker(WorkerSettings("postgresql://x", analysis_engine="typo"))
+
+    def test_dowhy_selection_does_not_load_legacy_champion(self) -> None:
+        with (
+            patch("rca.dowhy_engine.DoWhyRootCauseRanker") as provider,
+            patch("rca.worker.load_champion_artifact") as load,
+        ):
+            worker = RCAWorker(WorkerSettings("postgresql://unused"))
+        self.assertIs(worker.ranker, provider.return_value)
+        load.assert_not_called()
+
+    def test_explicit_heuristic_and_champion_remain_available(self) -> None:
+        with patch("rca.worker.load_champion_artifact", return_value=None) as load:
+            heuristic = RCAWorker(
+                WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+            )
+            load.assert_not_called()
+            champion = RCAWorker(
+                WorkerSettings("postgresql://unused", analysis_engine="champion")
+            )
+            load.assert_called_once()
+        self.assertEqual(type(heuristic.ranker).__name__, "HeuristicRootCauseRanker")
+        self.assertEqual(type(champion.ranker).__name__, "HeuristicRootCauseRanker")
+
+    def run_bucket(self, worker, result, lifecycle, events=None):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = {"acquired": True}
+        with (
+            patch.object(worker, "_connect", return_value=connection),
+            patch.object(worker, "_watermarks", return_value={}),
+            patch.object(worker, "_prime_history"),
+            patch.object(worker, "_resolve_terminal_active_incidents"),
+            patch.object(worker, "_raw_start", return_value=result.bucket.bucket_start),
+            patch.object(worker, "_fetch_raw", return_value=([], [], [])),
+            patch("rca.worker.aggregate_feature_buckets", return_value=[result.bucket]),
+            patch("rca.worker.build_dependency_edges", return_value=[]),
+            patch.object(worker.scorer, "score", return_value=result),
+            patch.object(worker, "_write_feature"),
+            patch.object(worker, "_run_lifecycles", return_value={"run-a": lifecycle}),
+        ):
+            if events is None:
+                return worker.run_once()
+            with patch.object(
+                worker, "_incident_events_for_lifecycle", return_value=("detect", events)
+            ):
+                return worker.run_once()
+
+    def test_warmup_reaches_provider_without_opening_an_incident(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+        provider = MagicMock()
+        worker.ranker = provider
+        result = self.anomaly("run-a", 0)
+        with patch.object(worker, "_persist_incident") as persist:
+            self.run_bucket(worker, result, RunLifecycle("warming"))
+        provider.observe.assert_called_once_with([result])
+        provider.rank.assert_not_called()
+        persist.assert_not_called()
+
+    def test_diagnosis_metadata_is_persisted_after_provider_runs(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+        result = self.anomaly("run-a", 0)
+        incident = Incident(
+            result.bucket.bucket_start, result.bucket.bucket_start, "payment",
+            ["payment"], 8, "warning", "run-a",
+        )
+        ranking = CandidateRanking(
+            "service", "payment", 1, 12.5, None, "low", "service_error",
+            "latency attribution", model_version="dowhy-gcm-0.14-latency-v1",
+        )
+        seen = []
+
+        def diagnose(actual, *_):
+            self.assertIs(actual, incident)
+            self.assertNotEqual(actual.id, original_id)
+            self.assertEqual(seen, ["observe"])
+            actual.metadata["analysis"] = {"provider": "dowhy-gcm", "status": "analyzed"}
+            seen.append("rank")
+            return RankerDecision((ranking,), False, None, 1.0)
+
+        def persist(_connection, event):
+            self.assertEqual(seen, ["observe", "rank"])
+            self.assertEqual(event.incident.metadata["analysis"]["provider"], "dowhy-gcm")
+            self.assertEqual(
+                event.incident.metadata["analysis_model_version"], ranking.model_version
+            )
+            seen.append("persist")
+            return event.incident
+
+        original_id = incident.id
+        provider = MagicMock()
+        provider.observe.side_effect = lambda _: seen.append("observe")
+        provider.rank.side_effect = diagnose
+        worker.ranker = provider
+        with (
+            patch.object(worker, "_persist_incident", side_effect=persist),
+            patch.object(worker, "_replace_rankings") as write,
+        ):
+            self.run_bucket(
+                worker, result, RunLifecycle("running"), [IncidentEvent("opened", incident)]
+            )
+        self.assertEqual(seen, ["observe", "rank", "persist"])
+        write.assert_called_once()
+
+    def test_restart_primes_provider_with_persisted_anomaly_scores(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+        provider = MagicMock()
+        worker.ranker = provider
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        cursor.fetchall.return_value = [{
+            "bucket_start": when, "entity_type": "service", "entity_id": "payment",
+            "run_id": "run-a", "features": {"latency_ms_p95": 400.0},
+            "anomaly_score": 8.0, "onset_score": 5.0,
+        }]
+        worker._prime_history(connection)
+        observed = provider.observe.call_args[0][0][0]
+        self.assertEqual(observed.bucket.run_id, "run-a")
+        self.assertEqual(observed.bucket.value("latency_ms_p95"), 400.0)
+        self.assertEqual(observed.score, 8.0)
+        self.assertEqual(observed.onset_score, 5.0)
 
     def test_per_run_watermark_accepts_overlapping_historical_new_run(self) -> None:
         old = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -285,6 +419,22 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(cursor.queries[0][1][0], "service_error")
         self.assertIn("INSERT INTO recommendations", cursor.queries[1][0])
 
+    def test_attribution_recommendation_preserves_unknown_probability(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "id": "runbook-id", "title": "Investigate a service error", "entity_type": "service"
+        }
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(when, when, "checkout", ["checkout"], 8, "warning")
+        ranking = CandidateRanking(
+            "service", "checkout", 1, 12.5, None, "low", "service_error",
+            "latency attribution", model_version="dowhy-gcm-0.14-latency-v1",
+        )
+        RCAWorker._write_recommendation(cursor, incident, [(ranking, 123)])
+        params = cursor.execute.call_args[0][1]
+        self.assertIsNone(params[3])
+        self.assertIn("attribution score=12.500 (not a probability)", params[4])
+
     def test_persisted_candidate_contains_exact_online_feature_snapshot(self) -> None:
         class Cursor:
             def __init__(self):
@@ -333,6 +483,19 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(snapshot["baseline_score"], 0.9)
         self.assertEqual(snapshot["baseline_probability"], 0.8)
         self.assertEqual(snapshot["baseline_inverse_rank"], 1.0)
+
+        connection.the_cursor.queries.clear()
+        attribution = CandidateRanking(
+            "service", "checkout", 1, 12.5, None, "low", "service_error",
+            "latency attribution", model_version="dowhy-gcm-0.14-latency-v1",
+        )
+        worker._replace_rankings(connection, incident, [attribution])
+        external_insert = next(
+            item for item in connection.the_cursor.queries
+            if "INSERT INTO candidate_rankings" in item[0]
+        )
+        self.assertIsNone(external_insert[1][5])
+        self.assertEqual(json.loads(external_insert[1][-1]), {})
 
 
 if __name__ == "__main__":
