@@ -1,0 +1,8 @@
+{
+  "run_id": "00000000-0000-0000-0000-000000000001",
+  "telemetry": {"spans": 10, "metric_points": 10, "log_records": 10},
+  "incidents": [{"id": "fixture-payment"}],
+  "candidates": [
+    {"incident_id": "fixture-payment", "rank": 1, "entity_type": "dependency_edge", "entity_id": "checkout->payment", "model_version": "fixture-only"}
+  ]
+}

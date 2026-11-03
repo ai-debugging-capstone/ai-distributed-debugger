@@ -184,6 +184,12 @@ leakage ablations.
 
 ## Metrics
 
+For a small read-only evaluation of known payment, cart, ad-service, or other
+mapped failures, see [M6_RCA_EVALUATION.md](M6_RCA_EVALUATION.md). This workflow
+scores explicit runner manifests against saved or API capture summaries, retaining
+failed and inconclusive attempts in Hit@1/Hit@3 denominators. It is separate from
+the accepted-only training export and does not inject faults or retrain models.
+
 Detection:
 
 - event-level precision, recall, F1/F2, and PR-AUC;

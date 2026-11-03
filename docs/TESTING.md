@@ -124,6 +124,38 @@ The disposable server can be removed instead of touching any product database.
 
 ## Known limitation and ongoing milestones
 
+### M6 evaluation extension
+
+The read-only known-failure workflow and reproduction commands are documented in
+[M6_RCA_EVALUATION.md](M6_RCA_EVALUATION.md). It reuses the existing fault-runner
+labels, capture-summary API, and ranking metrics to report payment/cart/ad (and
+other mapped) scenarios without invoking fault injection. Saved synthetic
+diagnoses exercise passed, failed, and inconclusive outcomes; these fixtures are
+not real model accuracy evidence.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -c pytest.ini tests/rca/test_experiment_evaluation.py tests/rca/test_demo_experiment.py
+.\.venv\Scripts\python.exe -m pytest -c pytest.ini --junitxml=tmp/m6-full-offline.xml
+```
+
+November 3, 2026: **199 tests collected, 188 passed, 11 PostgreSQL tests skipped**.
+The 34 new cases cover exact causal identity/edges, top-k boundaries, missing and
+malformed diagnoses, incident/run weighting, repeatability, API GET-only behavior,
+offline replay, duplicate-run rejection, and preserving existing output files.
+The full offline run includes all 154 existing offline M5 tests. After Docker
+Desktop became available, the complete suite was rerun on November 3, 2026:
+**199 passed, zero failed, zero skipped** in 3.94 seconds, including all 11
+PostgreSQL integration tests. Evidence: `tmp/m6-testing-full.xml`. The separate
+`m6-testing-postgres` container used PostgreSQL 17.6 on localhost:55433 with its
+own anonymous volume. No temporary test databases remained before cleanup;
+the container and its anonymous volume were automatically removed after stopping
+only that container. The main application database and volumes were untouched.
+No M6 code fixes were needed. See the M6 document
+for the Windows sandbox workaround, JUnit evidence, remaining warning, and the
+explicit distinction between evaluator tests and real RCA accuracy measurement.
+
+### Existing limitations
+
 `test_jsonb_storage_failure_rolls_back_valid_sibling_and_run_placeholder` deliberately
 verifies a known failure mode: an OTLP NaN attribute reaches JSONB, returns HTTP
 503, and rolls back even a valid sibling. It proves atomic rollback and recovery,

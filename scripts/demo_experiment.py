@@ -570,6 +570,20 @@ def _positive_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def expected_causal_candidates(scenario: dict[str, Any]) -> list[dict[str, str]]:
+    """Shared exact labels for capture acceptance and read-only evaluation."""
+    expected = [{
+        "entity_type": "dependency_edge" if scenario["entity_type"] == "edge" else scenario["entity_type"],
+        "entity_id": scenario["entity_id"],
+    }]
+    source, target = scenario.get("edge_source"), scenario.get("edge_target")
+    if source and target:
+        edge = {"entity_type": "dependency_edge", "entity_id": f"{source}->{target}"}
+        if edge not in expected:
+            expected.append(edge)
+    return expected
+
+
 def accept_capture(arguments: argparse.Namespace) -> None:
     """Fail closed unless a recovering run has trainable, persisted RCA output."""
 
@@ -601,30 +615,9 @@ def accept_capture(arguments: argparse.Namespace) -> None:
     scenario = validate_scenario_profile(
         str(manifest["scenario"]), str(manifest["profile"])
     )
-    expected_type = (
-        "dependency_edge"
-        if scenario["entity_type"] == "edge"
-        else str(scenario["entity_type"])
-    )
-    expected_id = str(scenario["entity_id"])
-    expected_candidates = [
-        {"entity_type": expected_type, "entity_id": expected_id}
-    ]
-    edge_source = scenario.get("edge_source")
-    edge_target = scenario.get("edge_target")
-    edge_id = (
-        f"{edge_source}->{edge_target}" if edge_source and edge_target else None
-    )
-    if edge_id and not any(
-        item["entity_type"] == "dependency_edge" and item["entity_id"] == edge_id
-        for item in expected_candidates
-    ):
-        # A known causal dependency is valid at a more actionable granularity
-        # than its endpoint.  Persist both labels; acceptance succeeds when
-        # either the injected entity or its explicitly declared edge is top-k.
-        expected_candidates.append(
-            {"entity_type": "dependency_edge", "entity_id": edge_id}
-        )
+    expected_candidates = expected_causal_candidates(scenario)
+    expected_type = expected_candidates[0]["entity_type"]
+    expected_id = expected_candidates[0]["entity_id"]
     telemetry = summary.get("telemetry") or {}
     incidents = summary.get("incidents") or []
     candidates = summary.get("candidates") or []
