@@ -1,0 +1,188 @@
+name: ${COMPOSE_PROJECT_NAME:-telemetry-rca}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-database-environment: &database-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-rca}:${POSTGRES_PASSWORD:-rca-local-password}@rca-db:5432/${POSTGRES_DB:-rca}
+  POSTGRES_HOST: rca-db
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-rca}
+  POSTGRES_USER: ${POSTGRES_USER:-rca}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rca-local-password}
+
+services:
+  rca-db:
+    image: postgres:17.6-alpine
+    container_name: rca-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rca}
+      POSTGRES_USER: ${POSTGRES_USER:-rca}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rca-local-password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      - rca-postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rca} -d ${POSTGRES_DB:-rca}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - rca-shared
+    logging: *default-logging
+
+  rca-api:
+    image: telemetry-rca/api:local
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: rca-api
+    restart: unless-stopped
+    environment:
+      <<: *database-environment
+      HOST: 0.0.0.0
+      PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OTLP_MAX_REQUEST_BYTES: ${OTLP_MAX_REQUEST_BYTES:-16777216}
+    ports:
+      - "${RCA_API_PORT:-8000}:8000"
+    depends_on:
+      rca-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      rca-shared:
+        aliases:
+          - rca-api
+    logging: *default-logging
+
+  rca-worker:
+    image: telemetry-rca/worker:local
+    build:
+      context: ./rca
+      dockerfile: Dockerfile
+    container_name: rca-worker
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - rca.worker
+    environment:
+      <<: *database-environment
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RCA_POLL_SECONDS: ${RCA_POLL_SECONDS:-5}
+      RCA_BUCKET_SECONDS: ${RCA_BUCKET_SECONDS:-10}
+      RCA_LOOKBACK_BUCKETS: ${RCA_LOOKBACK_BUCKETS:-30}
+      RCA_MIN_HISTORY_BUCKETS: ${RCA_MIN_HISTORY_BUCKETS:-10}
+      # Two closed 10-second buckets still suppress one-off spikes, while
+      # allowing low-QPS services (such as Demo payment) to be detected before
+      # an idle bucket breaks an otherwise real error burst.
+      RCA_MIN_INCIDENT_BUCKETS: ${RCA_MIN_INCIDENT_BUCKETS:-2}
+      RCA_MODEL_PATH: ${RCA_MODEL_PATH:-/app/artifacts/champion/model.json}
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    depends_on:
+      rca-db:
+        condition: service_healthy
+      rca-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "rca.worker", "--check"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - rca-shared
+    logging: *default-logging
+
+  otel-gateway:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.160.0
+    container_name: rca-otel-gateway
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      RCA_API_OTLP_ENDPOINT: http://rca-api:8000
+      OTEL_UPSTREAM_ENDPOINT: ${OTEL_UPSTREAM_ENDPOINT:-http://otel-collector:4318}
+      # A valid sentinel keeps the Collector config runnable outside an
+      # experiment; labeled runs temporarily replace it with their own UUID.
+      RCA_EXPERIMENT_RUN_ID: ${RCA_EXPERIMENT_RUN_ID:-00000000-0000-0000-0000-000000000000}
+    volumes:
+      - "${OTEL_GATEWAY_CONFIG:-./infra/otel-collector/gateway.yaml}:/etc/otelcol-contrib/config.yaml:ro"
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "${OTEL_HEALTH_PORT:-13133}:13133"
+    depends_on:
+      rca-api:
+        condition: service_healthy
+    networks:
+      rca-shared:
+        aliases:
+          - otel-gateway
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: rca-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rca-overview.json
+      POSTGRES_DB: ${POSTGRES_DB:-rca}
+      POSTGRES_USER: ${POSTGRES_USER:-rca}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rca-local-password}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      rca-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      rca-shared:
+        aliases:
+          - grafana
+    logging: *default-logging
+
+volumes:
+  rca-postgres-data:
+    name: ${POSTGRES_VOLUME:-telemetry-rca-postgres}
+  grafana-data:
+    name: ${GRAFANA_VOLUME:-telemetry-rca-grafana}
+
+networks:
+  rca-shared:
+    name: ${RCA_SHARED_NETWORK:-opentelemetry-demo}
+    driver: bridge

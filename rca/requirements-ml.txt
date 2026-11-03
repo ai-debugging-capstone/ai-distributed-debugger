@@ -1,0 +1,5 @@
+# Optional offline champion/challenger dependencies. The system remains runnable
+# without these packages and falls back to the portable supervised ranker.
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
+torch>=2.2,<3

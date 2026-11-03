@@ -1,0 +1,3 @@
+# Live worker dependency. The analytics, replay, synthetic generator, and portable
+# champion use only the Python standard library.
+psycopg[binary]>=3.2,<4

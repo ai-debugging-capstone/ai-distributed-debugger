@@ -1,0 +1,846 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+        "enable": true,
+        "expr": "",
+        "iconColor": "#F2495C",
+        "name": "Incident events",
+        "rawQuery": true,
+        "rawSql": "SELECT ie.occurred_at AS time, ie.title AS text, ARRAY[ie.entity_id, ie.event_type] AS tags FROM incident_events ie JOIN incidents i ON i.id = ie.incident_id WHERE $__timeFilter(ie.occurred_at)",
+        "showIn": 0
+      }
+    ]
+  },
+  "description": "Evidence-first incident detection and dependency-aware root-cause analysis for OpenTelemetry systems.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "RCA API",
+      "tooltip": "Open the API documentation",
+      "type": "link",
+      "url": "http://localhost:8000/docs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": true,
+      "title": "OpenTelemetry Demo",
+      "tooltip": "Open the instrumented system under test",
+      "type": "link",
+      "url": "http://localhost:8080"
+    }
+  ],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Incidents that currently require investigation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM incidents WHERE status IN ('open', 'monitoring')",
+          "refId": "A"
+        }
+      ],
+      "title": "Active incidents",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Highest calibrated probability for the selected incident.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 0,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 50 },
+              { "color": "green", "value": 75 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE(round(100 * probability)::double precision, 0) AS value FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Top-cause confidence",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Number of distinct components implicated by the selected incident.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "continuous-BlYlRd" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE(cardinality(affected_entities), 0)::double precision AS value FROM incidents WHERE id = (SELECT id FROM selected)",
+          "refId": "A"
+        }
+      ],
+      "title": "Affected components",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Seconds since the least-recent primary telemetry signal arrived.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 120 }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "id": 4,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - latest_at))), 0)::double precision AS value FROM v_telemetry_ingest_health WHERE signal IN ('spans', 'metrics', 'logs')",
+          "refId": "A"
+        }
+      ],
+      "title": "Signal freshness",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Records rejected during normalization in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM rejected_records WHERE $__timeFilter(received_at)",
+          "refId": "A"
+        }
+      ],
+      "title": "Rejected records",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Currently promoted ranking model. A deterministic heuristic is shown when no learned champion exists.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT COALESCE((SELECT model_version FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 1), (SELECT name || ' · ' || version FROM model_versions WHERE status = 'champion' ORDER BY trained_at DESC LIMIT 1), 'heuristic · baseline') AS value",
+          "refId": "A"
+        }
+      ],
+      "title": "Active model",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
+      "id": 100,
+      "panels": [],
+      "title": "INCIDENT COMMAND CENTER",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Select an incident above or use this table to scan recent investigations.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "id" },
+            "properties": [
+              { "id": "custom.hidden", "value": true },
+              { "id": "links", "value": [{ "targetBlank": false, "title": "Investigate", "url": "/d/rca-overview?var-incident_id=${__value.raw}" }] }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "probability" },
+            "properties": [{ "id": "unit", "value": "percentunit" }, { "id": "decimals", "value": 0 }]
+          }
+        ]
+      },
+      "gridPos": { "h": 7, "w": 10, "x": 0, "y": 5 },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "detected" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT id::text AS id, detected_at AS detected, status, severity, summary, COALESCE(top_entity_id, 'awaiting analysis') AS top_candidate, top_probability AS probability, COALESCE(top_fault_class, 'unknown') AS fault_class FROM v_incident_overview WHERE $__timeFilter(detected_at) ORDER BY detected_at DESC LIMIT 50",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent incidents",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Ranked causal entities. Confidence is calibrated; low-confidence results should be treated as investigative leads.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "probability" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "decimals", "value": 0 },
+              { "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "gauge" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 7, "w": 14, "x": 10, "y": 5 },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": false, "displayName": "rank" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT rank, entity_type AS type, entity_id AS candidate, fault_class, probability, confidence, round(score::numeric, 3) AS score, evidence_summary AS explanation FROM candidate_rankings WHERE incident_id = (SELECT id FROM selected) ORDER BY rank LIMIT 15",
+          "refId": "A"
+        }
+      ],
+      "title": "Root-cause candidates",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Directed dependencies observed around the selected incident. Edge color reflects error rate and the secondary statistic shows p95 latency.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "continuous-GrYlRd" },
+          "links": [],
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 11, "w": 14, "x": 0, "y": 12 },
+      "id": 9,
+      "options": { "nodes": { "mainStatUnit": "short", "secondaryStatUnit": "short" } },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id), target AS (SELECT started_at - interval '5 minutes' AS from_at, COALESCE(ended_at, now()) + interval '2 minutes' AS to_at, run_id FROM incidents WHERE id = (SELECT id FROM selected)), latest_edges AS (SELECT DISTINCT ON (source_service, target_service) source_service, target_service, request_count, error_rate, latency_ms_p95, protocol FROM dependency_edges, target WHERE bucket_start BETWEEN target.from_at AND target.to_at AND (target.run_id IS NULL OR dependency_edges.run_id = target.run_id) ORDER BY source_service, target_service, bucket_start DESC) SELECT source_service || '→' || target_service AS id, source_service AS source, target_service AS target, request_count::double precision AS \"mainStat\", (round(100 * error_rate)::text || '% errors · ' || COALESCE(round(latency_ms_p95)::text, 'n/a') || ' ms p95') AS \"secondaryStat\", CASE WHEN error_rate >= 0.20 THEN 'red' WHEN error_rate >= 0.05 THEN 'orange' ELSE 'green' END AS color, protocol AS detail__protocol FROM latest_edges",
+          "refId": "A"
+        }
+      ],
+      "title": "Observed failure-propagation graph",
+      "type": "nodeGraph"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Ordered evidence used to support or challenge each candidate.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "contribution" },
+            "properties": [{ "id": "unit", "value": "percentunit" }, { "id": "decimals", "value": 1 }]
+          }
+        ]
+      },
+      "gridPos": { "h": 11, "w": 10, "x": 14, "y": 12 },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": false, "displayName": "time" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT occurred_at AS time, evidence_type AS type, entity_id AS entity, signal_name AS signal, value, baseline, contribution, summary FROM evidence_items WHERE incident_id = (SELECT id FROM selected) ORDER BY occurred_at NULLS LAST, contribution DESC NULLS LAST LIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Evidence ledger",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 101,
+      "panels": [],
+      "title": "FAILURE TIMELINE",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Anomaly magnitude by entity. Early rising series are important temporal evidence, not automatic proof of causality.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Anomaly score",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 3 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 24 },
+      "id": 11,
+      "options": {
+        "legend": { "calcs": ["max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id), target AS (SELECT started_at - interval '10 minutes' AS from_at, COALESCE(ended_at, now()) + interval '5 minutes' AS to_at, run_id FROM incidents WHERE id = (SELECT id FROM selected)) SELECT bucket_start AS time, entity_id AS metric, anomaly_score AS value FROM feature_buckets, target WHERE bucket_start BETWEEN target.from_at AND target.to_at AND (target.run_id IS NULL OR feature_buckets.run_id = target.run_id) ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Anomaly onset by component",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Error rate and p95 latency around the incident; use the dashboard time picker to zoom further.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Error rate",
+            "axisPlacement": "left",
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 24 },
+      "id": 12,
+      "options": {
+        "legend": { "calcs": ["max", "mean"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id), target AS (SELECT started_at - interval '10 minutes' AS from_at, COALESCE(ended_at, now()) + interval '5 minutes' AS to_at, run_id FROM incidents WHERE id = (SELECT id FROM selected)) SELECT bucket_start AS time, entity_id AS metric, error_rate AS value FROM feature_buckets, target WHERE bucket_start BETWEEN target.from_at AND target.to_at AND (target.run_id IS NULL OR feature_buckets.run_id = target.run_id) ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Error propagation",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "id": 102,
+      "panels": [],
+      "title": "GUIDED DEBUGGING",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Reviewed diagnostics and remediation steps matched to the ranked failure mechanism. The system never executes these automatically.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "cellOptions": { "type": "auto", "wrapText": true }, "inspect": true },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 34 },
+      "id": 13,
+      "options": {
+        "cellHeight": "md",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT cr.rank, cr.entity_id AS candidate, rb.title AS runbook, rb.description, rb.diagnostic_steps::text AS diagnose, rb.remediation_steps::text AS remediate, rb.verification_steps::text AS verify, r.rationale FROM recommendations r JOIN runbooks rb ON rb.id = r.runbook_id LEFT JOIN candidate_rankings cr ON cr.id = r.candidate_id WHERE r.incident_id = (SELECT id FROM selected) ORDER BY cr.rank NULLS LAST, r.compatibility_score DESC NULLS LAST",
+          "refId": "A"
+        }
+      ],
+      "title": "Recommended investigation runbooks",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Human feedback closes the learning loop without changing the current incident result.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 34 },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "submitted" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id) SELECT created_at AS submitted, COALESCE(verdict, CASE WHEN accepted THEN 'correct' ELSE 'unknown' END) AS verdict, user_name AS reviewer, comment FROM developer_feedback WHERE incident_id = (SELECT id FROM selected) ORDER BY created_at DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Developer feedback",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+      "id": 103,
+      "panels": [],
+      "title": "PLATFORM HEALTH & MODEL GOVERNANCE",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Collector-to-database flow by signal. A flat line may indicate an instrumentation, collector, or ingestion outage.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "records/min",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 45,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 10, "x": 0, "y": 44 },
+      "id": 15,
+      "options": {
+        "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('minute', observed_at) AS time, 'spans' AS metric, count(*)::double precision AS value FROM spans WHERE $__timeFilter(observed_at) GROUP BY 1 UNION ALL SELECT date_trunc('minute', observed_at) AS time, 'metrics' AS metric, count(*)::double precision AS value FROM metric_points WHERE $__timeFilter(observed_at) GROUP BY 1 UNION ALL SELECT date_trunc('minute', received_at) AS time, 'logs' AS metric, count(*)::double precision AS value FROM log_records WHERE $__timeFilter(received_at) GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Telemetry throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Latest timestamp and lifetime count for each stored signal.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "age_seconds" },
+            "properties": [
+              { "id": "unit", "value": "s" },
+              { "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 30 }, { "color": "red", "value": 120 }] } }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 9, "w": 6, "x": 10, "y": 44 },
+      "id": 16,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT signal, records, latest_at, EXTRACT(EPOCH FROM (now() - latest_at))::bigint AS age_seconds FROM v_telemetry_ingest_health ORDER BY signal",
+          "refId": "A"
+        }
+      ],
+      "title": "Signal quality",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Champion/challenger registry and held-out evaluation metadata.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": true },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 44 },
+      "id": 17,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "trained" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT name, version, model_kind AS architecture, status, trained_at AS trained, metrics::text AS evaluation FROM model_versions ORDER BY CASE status WHEN 'champion' THEN 0 WHEN 'challenger' THEN 1 ELSE 2 END, trained_at DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Model registry",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+      "description": "Reproducible labeled runs collected from the pinned OpenTelemetry Demo.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 53 },
+      "id": 18,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "started" }]
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT er.started_at AS started, er.name AS run, er.source_version AS demo_version, left(er.source_sha, 12) AS commit, er.seed, er.workload, er.status, COALESCE(er.split, 'unassigned') AS dataset_split, count(fi.id) AS injected_faults FROM experiment_runs er LEFT JOIN fault_injections fi ON fi.run_id = er.id WHERE er.created_at >= $__timeFrom() GROUP BY er.id ORDER BY er.started_at DESC NULLS LAST LIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Dataset & experiment lineage",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["rca", "opentelemetry", "debugging", "root-cause"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "Latest incident", "value": "__latest__" },
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "rca-postgres" },
+        "definition": "SELECT '__latest__' AS __value, 'Latest incident' AS __text UNION ALL SELECT id::text AS __value, to_char(detected_at, 'MM-DD HH24:MI') || ' · ' || severity || ' · ' || left(summary, 64) AS __text FROM incidents WHERE detected_at >= now() - interval '14 days' ORDER BY __text DESC",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Incident",
+        "multi": false,
+        "name": "incident_id",
+        "options": [],
+        "query": "SELECT '__latest__' AS __value, 'Latest incident' AS __text UNION ALL SELECT id::text AS __value, to_char(detected_at, 'MM-DD HH24:MI') || ' · ' || severity || ' · ' || left(summary, 64) AS __text FROM incidents WHERE detected_at >= now() - interval '14 days' ORDER BY __text DESC",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"],
+    "time_options": ["15m", "30m", "1h", "3h", "6h", "12h", "24h", "2d", "7d"]
+  },
+  "timezone": "browser",
+  "title": "Telemetry RCA · Incident Command Center",
+  "uid": "rca-overview",
+  "version": 1,
+  "weekStart": ""
+}
