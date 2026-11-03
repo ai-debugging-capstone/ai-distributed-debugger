@@ -295,6 +295,12 @@ engineer actually asks them:
 6. **Was the diagnosis useful?** Developer feedback records acceptance and the
    eventual cause for later evaluation; it does not silently retrain a model.
 
+To follow a single request span by span, open the **Trace waterfall** link at
+the top of the dashboard, or click a suspect in the ranked list to see only the
+traces that pass through it (`http://localhost:3000/d/rca-traces`). With no
+trace chosen it opens the trace with the most errors around the selected
+incident.
+
 Equivalent API calls are available for automation:
 
 ```text

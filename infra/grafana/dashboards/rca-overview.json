@@ -30,6 +30,18 @@
   "links": [
     {
       "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Trace waterfall",
+      "tooltip": "Follow one request through the services, span by span",
+      "type": "link",
+      "url": "/d/rca-traces/trace-waterfall"
+    },
+    {
+      "asDropdown": false,
       "icon": "external link",
       "includeVars": true,
       "keepTime": true,
@@ -103,7 +115,7 @@
           "pluginVersion": "11.5.2",
           "options": {
             "mode": "markdown",
-            "content": "### How to read this page\n\nWork from the top down. Each section answers one question.\n\n| Section | Question it answers |\n| --- | --- |\n| **Most likely cause** | What is broken, and how much should I trust that? |\n| **Right now** | Is the incident still live? Is TraceLens still receiving data? |\n| **What to do next** | Which reviewed steps should I follow? TraceLens never runs them for you. |\n| **Suspects and evidence** | What else could it be, and what argues for and against the top suspect? |\n| **How it spread** | Who went wrong first, and where do the suspects sit in the system? |\n| **Detailed charts / TraceLens health** | Raw signals for deeper digging, and the platform's own health. |\n\n**Colour means one thing.** Red needs action, amber means check this, green is healthy, blue is something you can click, grey means no signal.\n\n**Trust levels.** *Strong*: evidence agrees, start with the runbook. *Likely*: best lead, but check the next suspect. *Weak lead*: only if the top suspects are ruled out. *Inconclusive*: investigate by hand with the timeline.\n\nThe **ranking score** compares suspects with each other. It is not the same as trust: a suspect can score 99% and still only be *Likely*.\n",
+            "content": "### How to read this page\n\nWork from the top down. Each section answers one question.\n\n| Section | Question it answers |\n| --- | --- |\n| **Most likely cause** | What is broken, and how much should I trust that? |\n| **Right now** | Is the incident still live? Is TraceLens still receiving data? |\n| **What to do next** | Which reviewed steps should I follow? TraceLens never runs them for you. |\n| **Suspects and evidence** | What else could it be, and what argues for and against the top suspect? |\n| **How it spread** | Who went wrong first, and where do the suspects sit in the system? |\n| **Detailed charts / TraceLens health** | Raw signals for deeper digging, and the platform's own health. |\n| **Trace waterfall** (link at the top right, or click a suspect) | How did one request move through the services, span by span? |\n\n**Colour means one thing.** Red needs action, amber means check this, green is healthy, blue is something you can click, grey means no signal.\n\n**Trust levels.** *Strong*: evidence agrees, start with the runbook. *Likely*: best lead, but check the next suspect. *Weak lead*: only if the top suspects are ruled out. *Inconclusive*: investigate by hand with the timeline.\n\nThe **ranking score** compares suspects with each other. It is not the same as trust: a suspect can score 99% and still only be *Likely*.\n",
             "code": {"language": "plaintext", "showLineNumbers": false, "showMiniMap": false}
           },
           "transparent": true
@@ -718,7 +730,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id), onset AS (SELECT candidate_id, min(value) AS delay FROM evidence_items WHERE incident_id = (SELECT id FROM selected) AND evidence_type = 'temporal_precedence' GROUP BY candidate_id) SELECT cr.rank, replace(cr.entity_id, '->', ' → ') AS suspect, CASE cr.entity_type WHEN 'dependency_edge' THEN 'Connection' WHEN 'service' THEN 'Service' WHEN 'service_instance' THEN 'Instance' WHEN 'database' THEN 'Database' WHEN 'queue' THEN 'Queue' WHEN 'cache' THEN 'Cache' WHEN 'host' THEN 'Host' WHEN 'external' THEN 'Outside load' WHEN 'no_fault' THEN 'No fault' ELSE initcap(replace(cr.entity_type, '_', ' ')) END AS kind, CASE cr.fault_class WHEN 'dependency_unreachable' THEN 'Can''t reach a dependency' WHEN 'service_error' THEN 'Returning errors' WHEN 'conditional_service_error' THEN 'Returning errors for some requests' WHEN 'resource_saturation' THEN 'Running out of capacity' WHEN 'queue_lag' THEN 'Queue falling behind' WHEN 'database_lock' THEN 'Stuck on database locks' WHEN 'workload_spike' THEN 'Traffic spike' WHEN 'cache_failure' THEN 'Cache failing' WHEN 'memory_leak' THEN 'Leaking memory' WHEN 'garbage_collection_pause' THEN 'Pausing for garbage collection' WHEN 'readiness_failure' THEN 'Failing health checks' WHEN 'dependency_latency' THEN 'Slow to answer' WHEN 'conditional_dependency_latency' THEN 'Slow for some requests' WHEN 'no_fault' THEN 'No fault' ELSE initcap(replace(COALESCE(cr.fault_class, 'unknown'), '_', ' ')) END AS what_went_wrong, COALESCE(cr.probability, cr.score) AS score, CASE cr.confidence WHEN 'high' THEN 'Strong' WHEN 'medium' THEN 'Likely' WHEN 'low' THEN 'Weak lead' ELSE 'Inconclusive' END AS trust, CASE WHEN o.delay IS NULL THEN 'Unknown' WHEN o.delay = 0 THEN 'Yes, changed first' ELSE CASE WHEN (o.delay) IS NULL THEN NULL WHEN (o.delay) < 60 THEN round(o.delay)::text || ' s' WHEN (o.delay) < 3600 THEN floor((o.delay) / 60)::text || ' min ' || round(mod((o.delay)::numeric, 60))::text || ' s' WHEN (o.delay) < 86400 THEN floor((o.delay) / 3600)::text || ' h ' || floor(mod((o.delay)::numeric, 3600) / 60)::text || ' min' ELSE floor((o.delay) / 86400)::text || ' days' END || ' later' END AS started_first FROM candidate_rankings cr LEFT JOIN onset o ON o.candidate_id = cr.id WHERE cr.incident_id = (SELECT id FROM selected) ORDER BY cr.rank LIMIT 15",
+          "rawSql": "WITH selected AS (SELECT COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) AS id), onset AS (SELECT candidate_id, min(value) AS delay FROM evidence_items WHERE incident_id = (SELECT id FROM selected) AND evidence_type = 'temporal_precedence' GROUP BY candidate_id) SELECT cr.rank, replace(cr.entity_id, '->', ' → ') AS suspect, CASE cr.entity_type WHEN 'dependency_edge' THEN 'Connection' WHEN 'service' THEN 'Service' WHEN 'service_instance' THEN 'Instance' WHEN 'database' THEN 'Database' WHEN 'queue' THEN 'Queue' WHEN 'cache' THEN 'Cache' WHEN 'host' THEN 'Host' WHEN 'external' THEN 'Outside load' WHEN 'no_fault' THEN 'No fault' ELSE initcap(replace(cr.entity_type, '_', ' ')) END AS kind, CASE cr.fault_class WHEN 'dependency_unreachable' THEN 'Can''t reach a dependency' WHEN 'service_error' THEN 'Returning errors' WHEN 'conditional_service_error' THEN 'Returning errors for some requests' WHEN 'resource_saturation' THEN 'Running out of capacity' WHEN 'queue_lag' THEN 'Queue falling behind' WHEN 'database_lock' THEN 'Stuck on database locks' WHEN 'workload_spike' THEN 'Traffic spike' WHEN 'cache_failure' THEN 'Cache failing' WHEN 'memory_leak' THEN 'Leaking memory' WHEN 'garbage_collection_pause' THEN 'Pausing for garbage collection' WHEN 'readiness_failure' THEN 'Failing health checks' WHEN 'dependency_latency' THEN 'Slow to answer' WHEN 'conditional_dependency_latency' THEN 'Slow for some requests' WHEN 'no_fault' THEN 'No fault' ELSE initcap(replace(COALESCE(cr.fault_class, 'unknown'), '_', ' ')) END AS what_went_wrong, COALESCE(cr.probability, cr.score) AS score, CASE cr.confidence WHEN 'high' THEN 'Strong' WHEN 'medium' THEN 'Likely' WHEN 'low' THEN 'Weak lead' ELSE 'Inconclusive' END AS trust, CASE WHEN o.delay IS NULL THEN 'Unknown' WHEN o.delay = 0 THEN 'Yes, changed first' ELSE CASE WHEN (o.delay) IS NULL THEN NULL WHEN (o.delay) < 60 THEN round(o.delay)::text || ' s' WHEN (o.delay) < 3600 THEN floor((o.delay) / 60)::text || ' min ' || round(mod((o.delay)::numeric, 60))::text || ' s' WHEN (o.delay) < 86400 THEN floor((o.delay) / 3600)::text || ' h ' || floor(mod((o.delay)::numeric, 3600) / 60)::text || ' min' ELSE floor((o.delay) / 86400)::text || ' days' END || ' later' END AS started_first, CASE WHEN cr.entity_type = 'dependency_edge' THEN split_part(cr.entity_id, '->', 1) ELSE cr.entity_id END AS trace_service FROM candidate_rankings cr LEFT JOIN onset o ON o.candidate_id = cr.id WHERE cr.incident_id = (SELECT id FROM selected) ORDER BY cr.rank LIMIT 15",
           "refId": "A"
         }
       ],
@@ -735,7 +747,22 @@
           },
           {
             "matcher": {"id": "byName", "options": "suspect"},
-            "properties": [{"id": "displayName", "value": "Suspect"}]
+            "properties": [
+              {"id": "displayName", "value": "Suspect (click for traces)"},
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open traces through this suspect",
+                    "url": "/d/rca-traces/trace-waterfall?${__url_time_range}&var-incident_id=${incident_id}&var-service=${__data.fields.trace_service}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "trace_service"},
+            "properties": [{"id": "custom.hidden", "value": true}]
           },
           {
             "matcher": {"id": "byName", "options": "kind"},
@@ -967,7 +994,13 @@
         "cellHeight": "sm",
         "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
         "showHeader": true
-      }
+      },
+      "links": [
+        {
+          "title": "Open the trace waterfall",
+          "url": "/d/rca-traces/trace-waterfall?${__url_time_range}&var-incident_id=${incident_id}"
+        }
+      ]
     },
     {
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
@@ -996,7 +1029,13 @@
         }
       ],
       "fieldConfig": {"defaults": {}, "overrides": []},
-      "options": {"nodes": {}, "edges": {}, "layoutAlgorithm": "layered", "zoomMode": "cooperative"}
+      "options": {"nodes": {}, "edges": {}, "layoutAlgorithm": "layered", "zoomMode": "cooperative"},
+      "links": [
+        {
+          "title": "Open the trace waterfall",
+          "url": "/d/rca-traces/trace-waterfall?${__url_time_range}&var-incident_id=${incident_id}"
+        }
+      ]
     },
     {
       "collapsed": true,

@@ -1,0 +1,420 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Waterfall view of one distributed trace, with a picker scoped to the selected incident.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Back to Incident Brief",
+      "tooltip": "Return to the incident overview",
+      "type": "link",
+      "url": "/d/rca-overview"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": true,
+      "title": "OpenTelemetry Demo",
+      "tooltip": "Open the instrumented system under test",
+      "type": "link",
+      "url": "http://localhost:8080"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "pluginVersion": "11.5.2",
+      "title": "",
+      "type": "text",
+      "options": {
+        "mode": "markdown",
+        "content": "**How to use this page.** The waterfall below shows one request as it moved through the shop: each bar is a span (one service doing one job), indented under the call that caused it, and placed on a shared time axis.\n\n* With no trace chosen, it opens the **worst trace** around the selected incident: the one with the most errors, then the slowest, skipping long load-generator sessions over a minute.\n* Click any **Trace** ID in *Pick a trace* to open that one instead, or paste an ID into the **Trace ID** box above.\n* Use **Service** to list only traces that pass through one service. Suspect links on the Incident Brief set it for you.\n* Inside the waterfall, click a span to see its attributes. Red marks a span that reported an error.\n"
+      },
+      "transparent": true
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+      "description": "Up to 50 traces in the window, errors first, then slowest. Click a trace ID to open it below.",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 4},
+      "id": 2,
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT CASE WHEN '${incident_id}' = '__range__' THEN NULL ELSE COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) END AS id), win AS (SELECT COALESCE(i.started_at - interval '5 minutes', $__timeFrom()) AS from_at, COALESCE(LEAST(COALESCE(i.ended_at, now()) + interval '2 minutes', i.started_at + interval '60 minutes'), $__timeTo()) AS to_at FROM (SELECT 1) one LEFT JOIN incidents i ON i.id = (SELECT id FROM selected)), traces AS (SELECT s.trace_id, min(s.start_time) AS started, max(s.end_time) AS ended, count(*) AS spans, count(DISTINCT s.service_name) AS services, count(*) FILTER (WHERE s.status_code = 'ERROR') AS errors, bool_or('${service}' = '__all__' OR s.service_name = '${service}') AS matches FROM spans s, win WHERE s.start_time BETWEEN win.from_at AND win.to_at GROUP BY s.trace_id), ranked AS (SELECT * FROM traces WHERE matches ORDER BY errors DESC, (ended - started) DESC LIMIT 50), pick AS (SELECT COALESCE(NULLIF(trim('${trace_id}'), ''), (SELECT trace_id FROM ranked ORDER BY (ended - started) > interval '60 seconds', errors DESC, (ended - started) DESC LIMIT 1)) AS id), roots AS (SELECT DISTINCT ON (s.trace_id) s.trace_id, s.service_name, s.operation_name FROM spans s JOIN ranked r ON r.trace_id = s.trace_id AND s.start_time BETWEEN r.started AND r.ended ORDER BY s.trace_id, (s.parent_span_id IS NULL OR s.parent_span_id = '') DESC, s.start_time) SELECT CASE WHEN r.trace_id = (SELECT id FROM pick) THEN 'open' WHEN r.errors > 0 THEN 'error' ELSE 'ok' END AS state, r.started, ro.operation_name AS root_operation, ro.service_name AS root_service, EXTRACT(EPOCH FROM r.ended - r.started) * 1000 AS duration_ms, r.spans, r.services, r.errors, r.trace_id FROM ranked r LEFT JOIN roots ro ON ro.trace_id = r.trace_id ORDER BY r.errors DESC, (r.ended - r.started) DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Pick a trace",
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "#e8ebef", "value": null}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "state"},
+            "properties": [
+              {"id": "displayName", "value": " "},
+              {"id": "custom.width", "value": 90},
+              {"id": "custom.align", "value": "center"},
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "basic"}},
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "open": {"index": 0, "text": "Showing", "color": "#27466f"},
+                      "error": {"index": 1, "text": "Errors", "color": "#7a3a33"},
+                      "ok": {"index": 2, "text": "OK", "color": "#2a313b"}
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "started"},
+            "properties": [
+              {"id": "displayName", "value": "Started"},
+              {"id": "unit", "value": "time:HH:mm:ss.SSS"},
+              {"id": "custom.width", "value": 120}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "root_operation"},
+            "properties": [{"id": "displayName", "value": "Root operation"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "root_service"},
+            "properties": [{"id": "displayName", "value": "Root service"}, {"id": "custom.width", "value": 150}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "duration_ms"},
+            "properties": [
+              {"id": "displayName", "value": "Duration"},
+              {"id": "unit", "value": "ms"},
+              {"id": "decimals", "value": 1},
+              {"id": "custom.width", "value": 160},
+              {"id": "min", "value": 0},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "#6ea8ff"}},
+              {
+                "id": "custom.cellOptions",
+                "value": {"type": "gauge", "mode": "basic", "valueDisplayMode": "text"}
+              }
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "spans"},
+            "properties": [{"id": "displayName", "value": "Spans"}, {"id": "custom.width", "value": 70}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "services"},
+            "properties": [{"id": "displayName", "value": "Services"}, {"id": "custom.width", "value": 80}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "errors"},
+            "properties": [
+              {"id": "displayName", "value": "Errors"},
+              {"id": "custom.width", "value": 70},
+              {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+              {"id": "color", "value": {"mode": "thresholds"}},
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [{"color": "#a3adba", "value": null}, {"color": "#ff8f80", "value": 1}]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "trace_id"},
+            "properties": [
+              {"id": "displayName", "value": "Trace (click to open)"},
+              {"id": "custom.width", "value": 290},
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this trace in the waterfall",
+                    "url": "/d/rca-traces/trace-waterfall?${__url_time_range}&var-incident_id=${incident_id}&var-service=${service}&var-trace_id=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
+        "showHeader": true
+      }
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+      "description": "Headline numbers for the trace shown in the waterfall.",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 13},
+      "id": 3,
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT CASE WHEN '${incident_id}' = '__range__' THEN NULL ELSE COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) END AS id), win AS (SELECT COALESCE(i.started_at - interval '5 minutes', $__timeFrom()) AS from_at, COALESCE(LEAST(COALESCE(i.ended_at, now()) + interval '2 minutes', i.started_at + interval '60 minutes'), $__timeTo()) AS to_at FROM (SELECT 1) one LEFT JOIN incidents i ON i.id = (SELECT id FROM selected)), traces AS (SELECT s.trace_id, min(s.start_time) AS started, max(s.end_time) AS ended, count(*) AS spans, count(DISTINCT s.service_name) AS services, count(*) FILTER (WHERE s.status_code = 'ERROR') AS errors, bool_or('${service}' = '__all__' OR s.service_name = '${service}') AS matches FROM spans s, win WHERE s.start_time BETWEEN win.from_at AND win.to_at GROUP BY s.trace_id), ranked AS (SELECT * FROM traces WHERE matches ORDER BY errors DESC, (ended - started) DESC LIMIT 50), pick AS (SELECT COALESCE(NULLIF(trim('${trace_id}'), ''), (SELECT trace_id FROM ranked ORDER BY (ended - started) > interval '60 seconds', errors DESC, (ended - started) DESC LIMIT 1)) AS id), t AS (SELECT * FROM spans WHERE trace_id = (SELECT id FROM pick)) SELECT EXTRACT(EPOCH FROM max(end_time) - min(start_time)) * 1000 AS duration, count(*) AS spans, count(DISTINCT service_name) AS services, count(*) FILTER (WHERE status_code = 'ERROR') AS errors FROM t HAVING count(*) > 0",
+          "refId": "A"
+        }
+      ],
+      "title": "Selected trace",
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "#e8ebef"},
+          "mappings": [],
+          "noValue": "No trace in this window. Widen the time range or pick another incident.",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "#e8ebef", "value": null}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "duration"},
+            "properties": [
+              {"id": "displayName", "value": "Total duration"},
+              {"id": "unit", "value": "ms"},
+              {"id": "decimals", "value": 2}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "spans"},
+            "properties": [{"id": "displayName", "value": "Spans"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "services"},
+            "properties": [{"id": "displayName", "value": "Services"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "errors"},
+            "properties": [
+              {"id": "displayName", "value": "Spans with errors"},
+              {"id": "color", "value": {"mode": "thresholds"}},
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [{"color": "#5fd19b", "value": null}, {"color": "#ff8f80", "value": 1}]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/", "values": false},
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "text": {"titleSize": 14, "valueSize": 30}
+      }
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+      "description": "Every span in the trace on one time axis, nested under its parent. Click a span for its attributes and resource tags.",
+      "gridPos": {"h": 22, "w": 24, "x": 0, "y": 17},
+      "id": 4,
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT CASE WHEN '${incident_id}' = '__range__' THEN NULL ELSE COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) END AS id), win AS (SELECT COALESCE(i.started_at - interval '5 minutes', $__timeFrom()) AS from_at, COALESCE(LEAST(COALESCE(i.ended_at, now()) + interval '2 minutes', i.started_at + interval '60 minutes'), $__timeTo()) AS to_at FROM (SELECT 1) one LEFT JOIN incidents i ON i.id = (SELECT id FROM selected)), traces AS (SELECT s.trace_id, min(s.start_time) AS started, max(s.end_time) AS ended, count(*) AS spans, count(DISTINCT s.service_name) AS services, count(*) FILTER (WHERE s.status_code = 'ERROR') AS errors, bool_or('${service}' = '__all__' OR s.service_name = '${service}') AS matches FROM spans s, win WHERE s.start_time BETWEEN win.from_at AND win.to_at GROUP BY s.trace_id), ranked AS (SELECT * FROM traces WHERE matches ORDER BY errors DESC, (ended - started) DESC LIMIT 50), pick AS (SELECT COALESCE(NULLIF(trim('${trace_id}'), ''), (SELECT trace_id FROM ranked ORDER BY (ended - started) > interval '60 seconds', errors DESC, (ended - started) DESC LIMIT 1)) AS id) SELECT s.trace_id AS \"traceID\", s.span_id AS \"spanID\", NULLIF(s.parent_span_id, '') AS \"parentSpanID\", s.operation_name AS \"operationName\", s.service_name AS \"serviceName\", COALESCE((SELECT jsonb_agg(jsonb_build_object('key', k, 'value', v) ORDER BY k) FROM jsonb_each_text(s.resource_attributes) AS r(k, v)), '[]'::jsonb) AS \"serviceTags\", EXTRACT(EPOCH FROM s.start_time) * 1000 AS \"startTime\", s.duration_ms AS duration, COALESCE((SELECT jsonb_agg(jsonb_build_object('key', k, 'value', v) ORDER BY k) FROM jsonb_each_text(s.attributes) AS a(k, v)), '[]'::jsonb) AS tags, lower(s.span_kind) AS kind, CASE s.status_code WHEN 'ERROR' THEN 2 WHEN 'OK' THEN 1 ELSE 0 END AS \"statusCode\", s.status_message AS \"statusMessage\" FROM spans s WHERE s.trace_id = (SELECT id FROM pick) ORDER BY s.start_time",
+          "refId": "A"
+        }
+      ],
+      "title": "Trace waterfall",
+      "type": "traces",
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {"targetField": "serviceTags", "destinationType": "other"},
+              {"targetField": "tags", "destinationType": "other"}
+            ],
+            "fields": {}
+          }
+        }
+      ],
+      "options": {}
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+      "description": "The spans that reported an error status, earliest first. The earliest is usually closest to the cause.",
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 39},
+      "id": 5,
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH selected AS (SELECT CASE WHEN '${incident_id}' = '__range__' THEN NULL ELSE COALESCE(NULLIF('${incident_id}', '__latest__')::uuid, (SELECT id FROM incidents ORDER BY detected_at DESC LIMIT 1)) END AS id), win AS (SELECT COALESCE(i.started_at - interval '5 minutes', $__timeFrom()) AS from_at, COALESCE(LEAST(COALESCE(i.ended_at, now()) + interval '2 minutes', i.started_at + interval '60 minutes'), $__timeTo()) AS to_at FROM (SELECT 1) one LEFT JOIN incidents i ON i.id = (SELECT id FROM selected)), traces AS (SELECT s.trace_id, min(s.start_time) AS started, max(s.end_time) AS ended, count(*) AS spans, count(DISTINCT s.service_name) AS services, count(*) FILTER (WHERE s.status_code = 'ERROR') AS errors, bool_or('${service}' = '__all__' OR s.service_name = '${service}') AS matches FROM spans s, win WHERE s.start_time BETWEEN win.from_at AND win.to_at GROUP BY s.trace_id), ranked AS (SELECT * FROM traces WHERE matches ORDER BY errors DESC, (ended - started) DESC LIMIT 50), pick AS (SELECT COALESCE(NULLIF(trim('${trace_id}'), ''), (SELECT trace_id FROM ranked ORDER BY (ended - started) > interval '60 seconds', errors DESC, (ended - started) DESC LIMIT 1)) AS id) SELECT s.start_time, s.service_name, s.operation_name, s.duration_ms, COALESCE(NULLIF(s.status_message, ''), 'no message') AS message, COALESCE(s.attributes->>'http.url', s.attributes->>'url.full', s.attributes->>'rpc.method', s.attributes->>'db.statement', '') AS target FROM spans s WHERE s.trace_id = (SELECT id FROM pick) AND s.status_code = 'ERROR' ORDER BY s.start_time",
+          "refId": "A"
+        }
+      ],
+      "title": "Spans with errors in this trace",
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "#e8ebef", "value": null}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "start_time"},
+            "properties": [
+              {"id": "displayName", "value": "When"},
+              {"id": "unit", "value": "time:HH:mm:ss.SSS"},
+              {"id": "custom.width", "value": 120}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "service_name"},
+            "properties": [{"id": "displayName", "value": "Service"}, {"id": "custom.width", "value": 160}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "operation_name"},
+            "properties": [{"id": "displayName", "value": "Operation"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "duration_ms"},
+            "properties": [
+              {"id": "displayName", "value": "Duration"},
+              {"id": "unit", "value": "ms"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.width", "value": 100}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "message"},
+            "properties": [
+              {"id": "displayName", "value": "Error message"},
+              {"id": "custom.cellOptions", "value": {"type": "color-text", "wrapText": true}},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "#ff8f80"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "target"},
+            "properties": [
+              {"id": "displayName", "value": "Called"},
+              {"id": "custom.cellOptions", "value": {"type": "auto", "wrapText": true}}
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
+        "showHeader": true
+      }
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 40,
+  "tags": ["rca", "opentelemetry", "debugging", "traces"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": true, "text": "Latest incident", "value": "__latest__"},
+        "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+        "definition": "SELECT '__latest__' AS __value, 'Latest incident' AS __text UNION ALL SELECT '__range__', 'No incident · use the time picker' UNION ALL SELECT id::text AS __value, CASE WHEN status IN ('open', 'monitoring') AND detected_at < now() - interval '1 day' THEN 'stale' ELSE status END || ' · ' || severity || ' · ' || to_char(detected_at AT TIME ZONE 'UTC', 'MM-DD HH24:MI') || ' UTC · ' || left(summary, 56) AS __text FROM incidents WHERE detected_at >= now() - interval '14 days' OR status IN ('open', 'monitoring')",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Incident",
+        "multi": false,
+        "name": "incident_id",
+        "options": [],
+        "query": "SELECT '__latest__' AS __value, 'Latest incident' AS __text UNION ALL SELECT '__range__', 'No incident · use the time picker' UNION ALL SELECT id::text AS __value, CASE WHEN status IN ('open', 'monitoring') AND detected_at < now() - interval '1 day' THEN 'stale' ELSE status END || ' · ' || severity || ' · ' || to_char(detected_at AT TIME ZONE 'UTC', 'MM-DD HH24:MI') || ' UTC · ' || left(summary, 56) AS __text FROM incidents WHERE detected_at >= now() - interval '14 days' OR status IN ('open', 'monitoring')",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": {"selected": true, "text": "All services", "value": "__all__"},
+        "datasource": {"type": "grafana-postgresql-datasource", "uid": "rca-postgres"},
+        "definition": "SELECT '__all__' AS __value, 'All services' AS __text UNION ALL SELECT DISTINCT entity_id, entity_id FROM feature_buckets WHERE entity_type = 'service' AND bucket_start > now() - interval '1 day'",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Service",
+        "multi": false,
+        "name": "service",
+        "options": [],
+        "query": "SELECT '__all__' AS __value, 'All services' AS __text UNION ALL SELECT DISTINCT entity_id, entity_id FROM feature_buckets WHERE entity_type = 'service' AND bucket_start > now() - interval '1 day'",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": false, "text": "", "value": ""},
+        "hide": 0,
+        "label": "Trace ID",
+        "name": "trace_id",
+        "options": [{"selected": true, "text": "", "value": ""}],
+        "query": "",
+        "type": "textbox",
+        "description": "Leave empty to open the worst trace in the window."
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {"refresh_intervals": ["10s", "30s", "1m", "5m"]},
+  "timezone": "browser",
+  "title": "TraceLens · Trace Waterfall",
+  "uid": "rca-traces",
+  "version": 1,
+  "weekStart": ""
+}
