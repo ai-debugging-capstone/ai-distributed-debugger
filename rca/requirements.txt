@@ -1,0 +1,4 @@
+# Existing free causal-analysis engine and PostgreSQL worker dependency.
+# DoWhy is MIT-licensed and runs locally; no hosted API or LLM is used.
+dowhy==0.14
+psycopg[binary]>=3.2,<4

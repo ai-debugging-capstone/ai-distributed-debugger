@@ -1,0 +1,24 @@
+# Loaded last by scripts/start-demo.{sh,ps1}. It deliberately does not include
+# compose.agent.yaml and replaces the demo's private network with our shared one.
+networks:
+  default:
+    name: ${RCA_SHARED_NETWORK:-opentelemetry-demo}
+    external: true
+
+services:
+  otel-collector:
+    environment:
+      # Demo apps resolve this collector. Inside the collector, the receiver
+      # must bind locally rather than trying to bind the Docker DNS name.
+      OTEL_COLLECTOR_HOST: 0.0.0.0
+    volumes:
+      # Compose merges volumes by container target, replacing the upstream
+      # no-op extras file without changing the pinned vendor checkout.
+      - type: bind
+        source: ${RCA_DEMO_COLLECTOR_CONFIG:?Set by start-demo scripts}
+        target: /etc/otelcol-config-extras.yml
+        read_only: true
+    networks:
+      default:
+        aliases:
+          - demo-otel-collector

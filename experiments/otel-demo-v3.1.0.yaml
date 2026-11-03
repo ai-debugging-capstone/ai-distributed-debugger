@@ -1,0 +1,252 @@
+schema_version: 1
+testbed:
+  repository: https://github.com/open-telemetry/opentelemetry-demo.git
+  tag: 3.1.0
+  commit: dedc0178918e260823323b8d95005a8cb924b007
+  compose_files:
+    - compose.yaml
+    - compose.full.yaml
+  forbidden_compose_files:
+    - compose.agent.yaml
+  pii_flag:
+    name: emitRawPii
+    required_variant: "off"
+
+defaults:
+  warmup_seconds: 600
+  recovery_seconds: 300
+  repetitions_per_seed: 1
+  reset_between_runs: true
+  trace_sampling_ratio: 1.0
+  feature_bucket_seconds: 10
+  split_unit: complete_run
+  capture_seed_required: true
+  capture_seed_semantics: capture_partition_seed
+  actual_workload: mixed-commerce
+  upstream_load_generator: Locust 2.44.4
+  upstream_workload_rng_controlled: false
+
+# The stock load generator emits a weighted mix of commerce paths. Scenario
+# entries describe the path we intend the fault to affect; they do not claim
+# that the runner restricts Locust to that path.
+
+healthy_controls:
+  - key: healthy-normal-load
+    workload: mixed-commerce
+    hold_seconds: 600
+  - key: healthy-high-load
+    workload: sustained-high-volume
+    hold_seconds: 600
+  - key: healthy-bursty-load
+    workload: burst-with-recovery
+    hold_seconds: 600
+
+scenarios:
+  - key: ad-service-error
+    flag: adFailure
+    variants: ["on"]
+    platform: docker
+    injector: ad
+    causal_entity: {type: service, id: ad}
+    mechanism: service_error
+    impacted_sli: frontend_ad_availability
+    intended_workload_exercise: browse-products
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: ad-high-cpu
+    flag: adHighCpu
+    variants: ["on"]
+    platform: docker
+    injector: ad
+    causal_entity: {type: service, id: ad}
+    mechanism: resource_saturation
+    impacted_sli: frontend_ad_latency
+    intended_workload_exercise: browse-products
+    hold_seconds: 300
+    runbook: resource-saturation-v1
+
+  - key: ad-manual-gc
+    flag: adManualGc
+    variants: ["on"]
+    platform: docker
+    injector: ad
+    causal_entity: {type: service, id: ad}
+    mechanism: garbage_collection_pause
+    impacted_sli: frontend_ad_latency
+    intended_workload_exercise: browse-products
+    hold_seconds: 300
+    runbook: resource-saturation-v1
+
+  - key: cart-partial-failure
+    flag: cartFailure
+    variants: [10%, 25%, 50%, 75%, 90%, 100%]
+    platform: docker
+    injector: cart
+    causal_entity: {type: service, id: cart}
+    mechanism: service_error
+    impacted_sli: cart_operation_success
+    intended_workload_exercise: add-and-empty-cart
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: email-memory-leak
+    flag: emailMemoryLeak
+    variants: [1x, 10x, 100x, 1000x, 10000x]
+    platform: docker
+    injector: email
+    causal_entity: {type: service, id: email}
+    mechanism: memory_leak
+    impacted_sli: checkout_confirmation_latency
+    intended_workload_exercise: repeated-checkout
+    hold_seconds: 900
+    runbook: resource-saturation-v1
+
+  - key: cart-readiness-failure
+    flag: failedReadinessProbe
+    variants: ["on"]
+    platform: kubernetes
+    injector: cart
+    causal_entity: {type: instance, id: cart}
+    mechanism: readiness_failure
+    impacted_sli: cart_availability
+    intended_workload_exercise: cart-operations
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: image-dependency-delay
+    flag: imageSlowLoad
+    variants: [5sec, 10sec]
+    platform: docker
+    injector: frontend
+    causal_entity:
+      type: edge
+      id: frontend-proxy->image-provider
+      source: frontend-proxy
+      target: image-provider
+    mechanism: dependency_latency
+    impacted_sli: page_render_latency
+    intended_workload_exercise: browse-products
+    hold_seconds: 300
+    runbook: dependency-unreachable-v1
+
+  - key: international-shipping-delay
+    flag: intlShippingSlowdown
+    variants: [5sec, 10sec]
+    platform: docker
+    injector: shipping
+    causal_entity: {type: service, id: shipping}
+    mechanism: conditional_dependency_latency
+    impacted_sli: international_checkout_latency
+    intended_workload_exercise: international-checkout
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: kafka-backlog
+    flag: kafkaQueueProblems
+    variants: ["on"]
+    platform: docker-full
+    injector: kafka-and-consumer
+    causal_entity: {type: queue, id: kafka}
+    mechanism: queue_lag
+    impacted_sli: order_processing_latency
+    intended_workload_exercise: repeated-checkout
+    hold_seconds: 600
+    multi_root: true
+    secondary_entities:
+      - {type: edge, id: checkout->kafka}
+      - {type: service, id: accounting}
+      - {type: service, id: fraud-detection}
+    runbook: queue-lag-v1
+
+  - key: external-homepage-flood
+    flag: loadGeneratorFloodHomepage
+    variants: ["on"]
+    platform: docker
+    injector: load-generator
+    causal_entity: {type: external, id: workload}
+    mechanism: workload_spike
+    impacted_sli: frontend_latency
+    intended_workload_exercise: homepage-flood
+    hold_seconds: 300
+    runbook: workload-spike-v1
+
+  - key: payment-partial-failure
+    flag: paymentFailure
+    variants: [10%, 25%, 50%, 75%, 90%, 100%]
+    platform: docker
+    injector: payment
+    causal_entity: {type: service, id: payment}
+    mechanism: service_error
+    impacted_sli: checkout_success
+    intended_workload_exercise: repeated-checkout
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: payment-unreachable
+    flag: paymentUnreachable
+    variants: ["on"]
+    platform: docker
+    injector: checkout
+    causal_entity:
+      type: edge
+      id: checkout->payment
+      source: checkout
+      target: payment
+    mechanism: dependency_unreachable
+    impacted_sli: checkout_success
+    intended_workload_exercise: repeated-checkout
+    hold_seconds: 300
+    runbook: dependency-unreachable-v1
+
+  - key: targeted-product-catalog-failure
+    flag: productCatalogFailure
+    variants: ["on"]
+    platform: docker
+    injector: product-catalog
+    causal_entity: {type: service, id: product-catalog}
+    mechanism: conditional_service_error
+    impacted_sli: product_detail_availability
+    intended_workload_exercise: targeted-product-OLJCESPC7Z
+    hold_seconds: 300
+    runbook: service-error-v1
+
+  - key: product-catalog-database-lock
+    flag: productCatalogLockContention
+    variants: ["on"]
+    platform: docker
+    injector: product-catalog
+    causal_entity:
+      type: database
+      id: astronomy-db
+      edge: product-catalog->astronomy-db
+    mechanism: database_lock
+    impacted_sli: catalog_and_checkout_latency
+    intended_workload_exercise: browse-and-checkout
+    hold_seconds: 600
+    runbook: database-lock-contention-v1
+
+  - key: recommendation-cache-failure
+    flag: recommendationCacheFailure
+    variants: ["on"]
+    platform: docker
+    injector: recommendation
+    causal_entity: {type: service, id: recommendation}
+    mechanism: cache_failure
+    impacted_sli: recommendation_latency
+    intended_workload_exercise: browse-products
+    hold_seconds: 300
+    runbook: service-error-v1
+
+robustness_only:
+  - network_delay
+  - packet_loss
+  - process_restart
+  - cpu_saturation
+  - memory_pressure
+  - concurrent_independent_faults
+  - missing_logs
+  - missing_metrics
+  - missing_traces
+  - reduced_trace_sampling
+  - topology_version_change
