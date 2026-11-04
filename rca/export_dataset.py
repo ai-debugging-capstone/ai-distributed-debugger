@@ -169,6 +169,12 @@ def build_candidate_records(
 
         entity_type = canonical_type(candidate.get("entity_type"))
         model_version = str(candidate.get("model_version") or "unknown")
+        if model_version.casefold().startswith("dowhy-gcm-"):
+            raise DatasetExportError(
+                "DoWhy attribution results are not supervised reranker features; "
+                "select heuristic/champion experiments for this legacy training export, "
+                "and evaluate DoWhy diagnoses using their recorded attribution evidence"
+            )
         stored_features = candidate.get("online_features")
         if not stored_features and not model_version.casefold().startswith("heuristic-"):
             raise DatasetExportError(

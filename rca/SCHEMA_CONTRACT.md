@@ -37,7 +37,7 @@ Content-Type: application/json
   cpu_percent, memory_bytes, log_error_count, anomaly_score, onset_score,
   features, missingness)`
 - `incidents(id, run_id, status, started_at, detected_at, ended_at, severity, summary,
-  trigger_entity, max_anomaly, affected_entities, metadata)`
+  trigger_entity, max_anomaly, affected_entities, model_version, metadata)`
 - `candidate_rankings(id, incident_id, rank, entity_type, entity_id, score,
   probability, fault_class, confidence, evidence_summary, online_features,
   model_version,
@@ -51,6 +51,14 @@ fields are `jsonb`; `affected_entities` is `text[]`. `value` and `baseline`
 are nullable `double precision` values in the canonical schema; categorical
 context belongs in the evidence `details` JSON object.
 
+`candidate_rankings.probability` and `recommendations.compatibility_score` must
+allow NULL. DoWhy candidates retain signed attribution scores and do not supply
+probabilities. Their `online_features` remains an empty JSON object because
+attribution outputs are not the historical supervised reranker's inputs.
+The actual provider version is stored on candidates and incidents; incident
+`metadata.analysis` records the requested provider, analyzed/fallback status,
+reason, baseline bounds, target, modeled graph, and causal assumptions.
+
 The worker makes feature and edge writes idempotent with scoped delete/insert,
 uses deterministic UUIDv5 incident IDs, and replaces rankings/evidence for an
 updated incident in one transaction. It acquires a PostgreSQL transaction-level
@@ -58,20 +66,26 @@ advisory lock so only one replica processes a cycle.
 
 ## Commands
 
-From the `499` directory:
+From the project root:
 
 ```powershell
 python -m rca.synthetic --scenario database_lock --output synthetic-run.json
 python -m rca.synthetic --scenario database_lock --post-url http://localhost:8000/api/v1/events/batch
 python -m rca.worker --database-url postgresql://rca:rca-local-password@localhost:55432/rca --once
 python -m rca.worker --database-url postgresql://rca:rca-local-password@localhost:55432/rca --check
+python scripts/dowhy_smoke.py
+python scripts/dowhy_smoke.py --api-url http://localhost:8000
 python -m rca.export_dataset --database-url postgresql://rca:rca-local-password@localhost:55432/rca --include-run <real-run-uuid> --source-repository https://github.com/open-telemetry/opentelemetry-demo.git --source-version 3.1.0 --source-sha dedc0178918e260823323b8d95005a8cb924b007
 python -m rca.train data/exports/candidate-ranking-<snapshot-version>.jsonl --output-dir artifacts/champion --portable --database-url postgresql://rca:rca-local-password@localhost:55432/rca
 python -m rca.promote --database-url postgresql://rca:rca-local-password@localhost:55432/rca --model-name candidate-ranker --model-version <model-version> --output-dir artifacts/champion
 python -m unittest discover -s tests/rca -v
 ```
 
-The exporter includes only completed runs with explicit ground-truth labels by
+DoWhy is the default worker engine; `--analysis-engine heuristic` and
+`--analysis-engine champion` select comparison paths. See
+[`../docs/DOWHY_INTEGRATION.md`](../docs/DOWHY_INTEGRATION.md) for scope and gates.
+
+The legacy supervised exporter includes only completed runs with explicit ground-truth labels by
 default. It derives model features from the online ranking/evidence records,
 writes an immutable checksum-bearing metadata sidecar with frozen sorted run
 provenance, registers `dataset_snapshots`, and
@@ -80,6 +94,8 @@ set. Use `--allow-unmatched` only for candidate-recall diagnosis, not champion
 training. Repeatable `--include-run` values and the optional exact source
 repository/version/SHA predicates are applied to every read in the same
 repeatable-read transaction and are frozen into snapshot statistics.
+It rejects DoWhy candidates explicitly so attribution scores cannot enter the
+historical classifier schema as if they were heuristic features.
 
 Docker build context is the `rca` directory (matching Compose):
 

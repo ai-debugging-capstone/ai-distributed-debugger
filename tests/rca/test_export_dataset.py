@@ -109,6 +109,21 @@ class DatasetExporterTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(summary["unmatched_incidents"], ["incident-1"])
 
+    def test_external_attribution_is_not_relabelled_as_reranker_training_data(self) -> None:
+        candidate = {
+            **self.candidate(1, "service", "payment"),
+            "model_version": "dowhy-gcm-0.14-latency-v1",
+            "probability": None,
+            "score": 4.2,
+            "online_features": {"baseline_score": 4.2},
+        }
+        labels = [{
+            "run_id": "run-1", "entity_type": "service", "entity_id": "payment",
+            "fault_class": "service_error", "relevance": 3, "is_primary": True,
+        }]
+        with self.assertRaisesRegex(DatasetExportError, "DoWhy attribution"):
+            build_candidate_records([candidate], labels, [])
+
     def test_labeled_incident_with_zero_candidates_fails_closed(self) -> None:
         candidates = [self.candidate(1, "service", "frontend")]
         labels = [

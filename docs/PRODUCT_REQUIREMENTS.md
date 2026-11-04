@@ -33,11 +33,20 @@ reviewed debugging runbook in Grafana.
 
 ### Root-cause analysis
 
-- Return an ordered candidate list with score, calibrated probability, model
-  version, failure class, and confidence.
+- Integrate the existing free DoWhy GCM engine for supported latency incidents.
+- Fit its built-in causal mechanisms only to healthy pre-incident observations;
+  do not use experiment labels or future samples during analysis.
+- Return an ordered candidate list with engine/version, score meaning, failure
+  class, evidence, and explicit limitations. DoWhy attribution is signed and its
+  probability must be null; no calibration is claimed.
+- Record the requested provider, actual execution status, reason, target, and
+  baseline sample count on the incident.
 - Abstain when evidence is insufficient.
 - Attach supporting and contradicting signal evidence.
-- Continue with a transparent fallback if a learned artifact is unavailable.
+- Continue with an identified heuristic fallback for unsupported incidents,
+  cyclic/incomplete graphs, insufficient history, or an unavailable provider.
+- Preserve optional heuristic/tabular comparison modes without requiring custom
+  Transformer development, a paid service, or an LLM.
 
 ### Debugging assistance
 
@@ -50,20 +59,32 @@ reviewed debugging runbook in Grafana.
 
 - Use Grafana as the only end-user interface.
 - Show incident summary, ranking, temporal propagation, live dependency graph,
-  evidence, signal health, runbook, uncertainty, and model status.
+  evidence, signal health, runbook, uncertainty, actual engine, and fallback
+  status/reason. Display unavailable probability as n/a, never zero confidence.
 - Capture whether the developer accepted the diagnosis and the eventual cause.
 
 ## Initial acceptance criteria
+
+These are verification targets. Historical real-data results and controlled
+integration checks do not establish that every target has been met.
 
 - The complete local stack starts with one documented command.
 - Synthetic smoke data produces an incident, candidates, evidence, graph, and
   runbook without manual database edits.
 - A pinned OpenTelemetry Demo can route real OTLP data through the same path.
+- A controlled latency experiment executes the actual DoWhy library, preserves
+  raw signed attribution, and identifies the injected component; fallback-only
+  execution must fail that integration check.
+- Healthy baseline samples precede incident onset, and other runs, labels,
+  future buckets, missing spans, and unsupported graphs cannot contaminate them.
 - A persistent injected fault is ranked within 60 seconds after detection.
 - Held-out known-fault experiments achieve Hit@3 of at least 0.85 before the
   learned model is called production-ready.
 - Healthy test traffic produces fewer than one false incident per hour.
-- Calibrated expected calibration error is at most 0.10.
+- For any future probability-producing model, calibrated expected calibration
+  error is at most 0.10 on a sufficiently large independent evaluation set.
+- Report all attempted fault diagnoses and healthy controls; capture-time top-3
+  acceptance alone is not an unbiased accuracy benchmark.
 - Every prediction is tied to a model version and every dataset to source SHA,
   environment, seed, and manifest.
 - Unit, database, API, worker, replay, and end-to-end tests pass.

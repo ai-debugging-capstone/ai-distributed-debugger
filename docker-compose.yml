@@ -95,6 +95,7 @@ services:
       # allowing low-QPS services (such as Demo payment) to be detected before
       # an idle bucket breaks an otherwise real error burst.
       RCA_MIN_INCIDENT_BUCKETS: ${RCA_MIN_INCIDENT_BUCKETS:-2}
+      RCA_ANALYSIS_ENGINE: ${RCA_ANALYSIS_ENGINE:-dowhy}
       RCA_MODEL_PATH: ${RCA_MODEL_PATH:-/app/artifacts/champion/model.json}
     volumes:
       - ./artifacts:/app/artifacts:ro
