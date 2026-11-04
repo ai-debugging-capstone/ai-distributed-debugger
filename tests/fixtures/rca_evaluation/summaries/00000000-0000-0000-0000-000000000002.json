@@ -1,0 +1,11 @@
+{
+  "run_id": "00000000-0000-0000-0000-000000000002",
+  "telemetry": {"spans": 10, "metric_points": 10, "log_records": 10},
+  "incidents": [{"id": "fixture-cart"}],
+  "candidates": [
+    {"incident_id": "fixture-cart", "rank": 1, "entity_type": "service", "entity_id": "frontend", "model_version": "fixture-only"},
+    {"incident_id": "fixture-cart", "rank": 2, "entity_type": "service", "entity_id": "checkout", "model_version": "fixture-only"},
+    {"incident_id": "fixture-cart", "rank": 3, "entity_type": "service", "entity_id": "payment", "model_version": "fixture-only"},
+    {"incident_id": "fixture-cart", "rank": 4, "entity_type": "service", "entity_id": "cart", "model_version": "fixture-only"}
+  ]
+}

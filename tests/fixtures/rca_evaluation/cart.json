@@ -1,0 +1,11 @@
+{
+  "experiment_id": "00000000-0000-0000-0000-000000000002",
+  "scenario": "cartFailure",
+  "profile": "full",
+  "variant": "100%",
+  "seed": 42,
+  "split": "holdout",
+  "status": "aborted",
+  "fault_started_at": "2026-01-01T00:01:00Z",
+  "fault_ended_at": "2026-01-01T00:03:00Z"
+}
