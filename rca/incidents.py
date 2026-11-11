@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import groupby
 
 from .domain import AnomalyResult, Incident
@@ -38,14 +38,20 @@ class IncidentDetector:
         anomaly_threshold: float = 3.5,
         min_consecutive: int = 2,
         recovery_consecutive: int = 3,
+        bucket_seconds: int = 10,
     ) -> None:
         if min_consecutive < 1 or recovery_consecutive < 1:
             raise ValueError("consecutive bucket counts must be positive")
+        if bucket_seconds < 1:
+            raise ValueError("bucket_seconds must be positive")
+        self.bucket_interval = timedelta(seconds=bucket_seconds)
         self.anomaly_threshold = anomaly_threshold
         self.min_consecutive = min_consecutive
         self.recovery_consecutive = recovery_consecutive
         self._streak: dict[tuple[str | None, str], int] = defaultdict(int)
         self._first_abnormal: dict[tuple[str | None, str], datetime] = {}
+        self._last_observed: dict[tuple[str | None, str], datetime] = {}
+        self._last_run_observed: dict[str | None, datetime] = {}
         self._active: dict[str | None, Incident] = {}
         self._recovery: dict[str | None, int] = defaultdict(int)
 
@@ -75,9 +81,12 @@ class IncidentDetector:
         active.status = "resolved"
         active.ended_at = resolved_at
         self._recovery.pop(run_id, None)
+        self._last_run_observed.pop(run_id, None)
+
         for key in [key for key in self._streak if key[0] == run_id]:
             self._streak.pop(key, None)
             self._first_abnormal.pop(key, None)
+            self._last_observed.pop(key, None)
         return IncidentEvent("resolved", active)
 
     def update(
@@ -96,10 +105,35 @@ class IncidentDetector:
         timestamp = next(iter(timestamps))
         run_id = next(iter(run_ids))
 
+        previous_run_timestamp = self._last_run_observed.get(run_id)
+        run_is_consecutive = (
+            previous_run_timestamp is not None
+            and timestamp - previous_run_timestamp == self.bucket_interval
+        )
+
+        if not run_is_consecutive:
+            self._recovery[run_id] = 0
+
+        self._last_run_observed[run_id] = timestamp
+
         anomalous: dict[str, AnomalyResult] = {}
         for result in results:
             key = (run_id, result.bucket.entity_id)
-            is_anomaly = result.sufficient_history and result.score >= self.anomaly_threshold
+
+            previous_timestamp = self._last_observed.get(key)
+            if (
+                previous_timestamp is None
+                or timestamp - previous_timestamp != self.bucket_interval
+            ):
+                self._streak[key] = 0
+                self._first_abnormal.pop(key, None)
+
+            self._last_observed[key] = timestamp
+
+            is_anomaly = (
+                result.sufficient_history
+                and result.score >= self.anomaly_threshold
+            )
             if is_anomaly:
                 self._streak[key] += 1
                 self._first_abnormal.setdefault(key, timestamp)
@@ -175,8 +209,16 @@ class IncidentDetector:
                     active.status = "resolved"
                     active.ended_at = timestamp
                     events.append(IncidentEvent("resolved", active))
+
                     del self._active[run_id]
                     del self._recovery[run_id]
+
+                    self._last_run_observed.pop(run_id, None)
+
+                    for key in [key for key in self._streak if key[0] == run_id]:
+                        self._streak.pop(key, None)
+                        self._first_abnormal.pop(key, None)
+                        self._last_observed.pop(key, None)
         return events
 
 

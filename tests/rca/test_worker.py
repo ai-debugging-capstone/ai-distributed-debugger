@@ -101,6 +101,86 @@ class WorkerConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RCAWorker(WorkerSettings("postgresql://x", analysis_engine="typo"))
 
+    def test_processing_delay_changes_bucket_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                bucket_seconds=10,
+                processing_delay_seconds=30,
+            )
+        )
+
+        now = datetime(2026, 1, 1, 12, 0, 45, tzinfo=timezone.utc)
+
+        cutoff = worker._processing_cutoff(now)
+
+        self.assertEqual(
+            cutoff,
+            datetime(2026, 1, 1, 12, 0, 10, tzinfo=timezone.utc),
+        )
+
+    def test_zero_processing_delay_preserves_original_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                bucket_seconds=10,
+                processing_delay_seconds=0,
+            )
+        )
+
+        now = datetime(2026, 1, 1, 12, 0, 45, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            worker._processing_cutoff(now),
+            datetime(2026, 1, 1, 12, 0, 40, tzinfo=timezone.utc),
+        )
+
+    def test_processing_delay_configuration_and_validation(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RCA_PROCESSING_DELAY_SECONDS": "30"},
+        ):
+            settings = WorkerSettings.from_env()
+
+        self.assertEqual(settings.processing_delay_seconds, 30)
+
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            RCAWorker(
+                WorkerSettings(
+                    "postgresql://unused",
+                    analysis_engine="heuristic",
+                    processing_delay_seconds=-1,
+                )
+            )
+    def test_worker_uses_delayed_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                processing_delay_seconds=30,
+            )
+        )
+
+        result = self.anomaly("run-a", 0)
+        expected_cutoff = datetime(
+            2026, 1, 1, 12, 0, 10, tzinfo=timezone.utc
+        )
+
+        with patch.object(
+            worker, "_processing_cutoff", return_value=expected_cutoff
+        ) as cutoff:
+            with patch.object(
+                worker, "_raw_start", return_value=result.bucket.bucket_start
+            ):
+                processed = self.run_bucket(
+                    worker, result, RunLifecycle("running")
+                )
+
+        cutoff.assert_called_once()
+        self.assertEqual(processed, 1)
+
     def test_dowhy_selection_does_not_load_legacy_champion(self) -> None:
         with (
             patch("rca.dowhy_engine.DoWhyRootCauseRanker") as provider,
@@ -228,6 +308,199 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(observed.bucket.value("latency_ms_p95"), 400.0)
         self.assertEqual(observed.score, 8.0)
         self.assertEqual(observed.onset_score, 5.0)
+
+    def test_restart_restores_open_incident_from_database(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            id="11111111-1111-1111-1111-111111111111",
+            run_id="22222222-2222-2222-2222-222222222222",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+            summary="Sustained anomaly affecting payment",
+            metadata={"detector": "robust-baseline-v1"},
+        )
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [{
+            "id": incident.id,
+            "run_id": incident.run_id,
+            "status": incident.status,
+            "started_at": incident.started_at,
+            "detected_at": incident.detected_at,
+            "ended_at": incident.ended_at,
+            "trigger_entity": incident.trigger_entity,
+            "affected_entities": incident.affected_entities,
+            "max_anomaly": incident.max_anomaly,
+            "severity": incident.severity,
+            "summary": incident.summary,
+            "metadata": incident.metadata,
+        }]
+
+        worker._restore_active_incidents(connection)
+
+        self.assertTrue(worker.detector.has_active_incident(incident.run_id))
+        restored = worker.detector.active_incidents[0]
+
+        self.assertEqual(restored.id, incident.id)
+        self.assertEqual(restored.started_at, incident.started_at)
+        self.assertEqual(restored.affected_entities, ["payment"])
+        self.assertEqual(restored.status, "open")
+
+    def test_restart_does_not_restore_resolved_incidents(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = []
+
+        worker._restore_active_incidents(connection)
+
+        self.assertEqual(worker.detector.active_incidents, ())
+
+        query = cursor.execute.call_args[0][0]
+        self.assertIn("status = 'open'", query)
+        self.assertIn("ended_at IS NULL", query)
+
+
+    def test_restart_rejects_duplicate_open_incidents_for_same_run(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        run_id = "22222222-2222-2222-2222-222222222222"
+
+        def stored_incident(incident_id):
+            return {
+                "id": incident_id,
+                "run_id": run_id,
+                "status": "open",
+                "started_at": started,
+                "detected_at": started + timedelta(seconds=10),
+                "ended_at": None,
+                "trigger_entity": "payment",
+                "affected_entities": ["payment"],
+                "max_anomaly": 8.0,
+                "severity": "warning",
+                "summary": "Sustained anomaly affecting payment",
+                "metadata": {},
+            }
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [
+            stored_incident("11111111-1111-1111-1111-111111111111"),
+            stored_incident("33333333-3333-3333-3333-333333333333"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Multiple open incidents"):
+            worker._restore_active_incidents(connection)
+
+        self.assertEqual(worker.detector.active_incidents, ())
+
+
+    def test_restored_incident_keeps_original_id_when_persisted(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        incident = Incident(
+            id="11111111-1111-1111-1111-111111111111",
+            run_id="22222222-2222-2222-2222-222222222222",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+        )
+
+        worker._identify_incident(incident)
+        original_id = incident.id
+
+        connection = MagicMock()
+
+        worker._persist_incident(
+            connection,
+            IncidentEvent("updated", incident),
+        )
+
+        self.assertEqual(incident.id, original_id)
+
+    def test_worker_restores_incidents_only_on_first_cycle(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        result = self.anomaly("run-a", 0)
+
+        with patch.object(worker, "_restore_active_incidents") as restore:
+            self.run_bucket(worker, result, RunLifecycle("running"))
+            self.run_bucket(worker, result, RunLifecycle("running"))
+
+        restore.assert_called_once()
+
+    def test_restored_incident_resolves_after_healthy_buckets(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        # Simulate an incident loaded from PostgreSQL.
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            run_id="run-a",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+        )
+
+        worker._identify_incident(incident)
+        original_id = incident.id
+        worker.detector._active["run-a"] = incident
+
+        # Healthy results from three consecutive 10-second buckets.
+        for offset in (2, 3, 4):
+            result = self.anomaly("run-a", offset)
+            result = result.__class__(
+                bucket=result.bucket,
+                score=0.0,
+                onset_score=0.0,
+                feature_scores={},
+                baselines={},
+                contributions={},
+                sufficient_history=True,
+            )
+
+            mode, events = worker._incident_events_for_lifecycle(
+                [result], RunLifecycle("recovering")
+            )
+
+            self.assertEqual(mode, "recover")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].action, "resolved")
+        self.assertEqual(events[0].incident.id, original_id)
+        self.assertEqual(events[0].incident.status, "resolved")
+        self.assertFalse(worker.detector.has_active_incident("run-a"))
 
     def test_per_run_watermark_accepts_overlapping_historical_new_run(self) -> None:
         old = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -419,6 +692,40 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(cursor.queries[0][1][0], "service_error")
         self.assertIn("INSERT INTO recommendations", cursor.queries[1][0])
 
+    #CK changes
+    def test_abstained_decision_does_not_attach_runbook(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "id": "runbook-id",
+            "title": "Investigate a service error",
+            "entity_type": "service",
+        }
+
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            when, when, "checkout", ["checkout"], 8, "warning"
+        )
+
+        ranking = CandidateRanking(
+            "service",
+            "checkout",
+            1,
+            0.9,
+            0.8,
+            "high",
+            "service_error",
+            "error_rate=0.9",
+        )
+
+        RCAWorker._write_recommendation(
+            cursor,
+            incident,
+            [(ranking, 123)],
+            abstained=True,
+        )
+
+        cursor.execute.assert_not_called()
+
     def test_attribution_recommendation_preserves_unknown_probability(self) -> None:
         cursor = MagicMock()
         cursor.fetchone.return_value = {
@@ -496,6 +803,77 @@ class WorkerConfigurationTests(unittest.TestCase):
         )
         self.assertIsNone(external_insert[1][5])
         self.assertEqual(json.loads(external_insert[1][-1]), {})
+
+    def test_abstained_ranking_replacement_does_not_create_recommendation(self) -> None:
+            class Cursor:
+                def __init__(self):
+                    self.queries = []
+                    self.next_row = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def execute(self, query, params):
+                    normalized = " ".join(query.split())
+                    self.queries.append((normalized, params))
+
+                    if "INSERT INTO candidate_rankings" in normalized:
+                        self.next_row = {"id": 123}
+                    elif "SELECT id, title, entity_type FROM runbooks" in normalized:
+                        self.next_row = {
+                            "id": "runbook-id",
+                            "title": "Investigate a service error",
+                            "entity_type": "service",
+                        }
+
+                def fetchone(self):
+                    return self.next_row
+
+            class Connection:
+                def __init__(self):
+                    self.the_cursor = Cursor()
+
+                def cursor(self):
+                    return self.the_cursor
+
+            when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            incident = Incident(
+                when, when, "checkout", ["checkout"], 8, "warning"
+            )
+
+            ranking = CandidateRanking(
+                "service", "checkout", 1, 0.9, 0.8,
+                "high", "service_error", "error_rate=0.9",
+            )
+
+            connection = Connection()
+            worker = RCAWorker.__new__(RCAWorker)
+
+            worker._replace_rankings(
+                connection,
+                incident,
+                [ranking],
+                abstained=True,
+            )
+
+            queries = [query for query, _ in connection.the_cursor.queries]
+
+            self.assertTrue(
+                any("DELETE FROM candidate_rankings" in query for query in queries)
+            )
+            self.assertTrue(
+                any("INSERT INTO candidate_rankings" in query for query in queries)
+            )
+            self.assertFalse(
+                any("INSERT INTO recommendations" in query for query in queries)
+            )
+            self.assertFalse(
+                any("SELECT id, title, entity_type FROM runbooks" in query for query in queries)
+            )
+
 
 
 if __name__ == "__main__":

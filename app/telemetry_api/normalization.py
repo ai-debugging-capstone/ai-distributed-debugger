@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
+import math
 
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -91,7 +92,11 @@ def any_value_to_python(value: Any) -> Any:
         return key_values_to_dict(value.kvlist_value.values)
     if kind == "bytes_value":
         return value.bytes_value.hex()
-    return getattr(value, kind)
+    result = getattr(value, kind)
+    if kind == "double_value" and not math.isfinite(result):
+        raise ValueError("nonfinite numeric attribute is not allowed")
+
+    return result
 
 
 def key_values_to_dict(values: Iterable[Any]) -> dict[str, Any]:

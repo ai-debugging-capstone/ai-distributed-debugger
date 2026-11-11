@@ -1,8 +1,12 @@
 """Actual API -> normalizer -> Psycopg -> PostgreSQL; payloads are synthetic OTLP."""
 
 import base64
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+from psycopg import sql
+from rca.domain import Incident
+from rca.incidents import IncidentEvent
+from rca.worker import RCAWorker, WorkerSettings
 
 import pytest
 from psycopg import sql
@@ -144,22 +148,124 @@ def test_retries_without_source_timestamps_are_deduplicated(postgres_api, signal
     assert len(rows(postgres_api, sample.table)) == 1
 
 
-def test_jsonb_storage_failure_rolls_back_valid_sibling_and_run_placeholder(postgres_api):
-    # Characterize an unresolved defect explicitly: OTLP nonfinite attributes
-    # reach JSONB and return 503 instead of per-record quarantine. This test
-    # checks transaction atomicity, not successful malformed-record handling.
+def test_nonfinite_log_is_quarantined_without_losing_valid_sibling(postgres_api):
     sample = make_sample("log")
+
     bad = sample.siblings.add()
     bad.CopyFrom(sample.item)
     bad.attributes.add(key="nonfinite").value.double_value = float("nan")
+
     response = post_sample(postgres_api, sample)
-    assert response.status_code == 503
-    assert response.json()["detail"] == "telemetry could not be persisted"
-    assert rows(postgres_api, "log_records") == []
-    assert rows(postgres_api, "rejected_records") == []
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-otlp-inserted"] == "1"
+    assert response.headers["x-otlp-rejected"] == "1"
+
+    parsed = sample.response_type.FromString(response.content)
+    assert getattr(parsed.partial_success, sample.partial_field) == 1
+
+    stored = rows(postgres_api, "log_records")
+    assert len(stored) == 1
+    assert "nonfinite" not in stored[0]["attributes"]
+
+    rejected = rows(postgres_api, "rejected_records")
+    assert len(rejected) == 1
+    assert rejected[0]["signal_type"] == "log"
+    assert "nonfinite numeric attribute" in rejected[0]["reason"]
+
     assert postgres_api.connection.execute(
         "SELECT id FROM experiment_runs WHERE id = %s", (RUN_ID,)
-    ).fetchone() is None
-    # The database/API remain usable after rollback.
-    del sample.siblings[1:]
-    assert post_sample(postgres_api, sample).headers["x-otlp-inserted"] == "1"
+    ).fetchone() is not None
+
+
+def test_worker_restores_and_resolves_persisted_incident(postgres_api):
+    connection = postgres_api.connection
+
+    run_id = uuid4()
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+
+    # Create a real experiment run.
+    connection.execute(
+        """
+        INSERT INTO experiment_runs (id, name, status, started_at)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (run_id, "restart-recovery-test", "running", started),
+    )
+
+    # Simulate the original worker detecting and saving an incident.
+    original_worker = RCAWorker(
+        WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+    )
+
+    incident = Incident(
+        run_id=str(run_id),
+        started_at=started,
+        detected_at=started,
+        trigger_entity="payment",
+        affected_entities=["payment"],
+        max_anomaly=8.0,
+        severity="warning",
+        status="open",
+        summary="Sustained anomaly affecting payment",
+    )
+
+    original_worker._persist_incident(
+        connection, IncidentEvent("opened", incident)
+    )
+    original_id = incident.id
+
+    connection.commit()
+
+    # A new worker starts with an empty detector.
+    restarted_worker = RCAWorker(
+        WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+    )
+
+    assert not restarted_worker.detector.has_active_incident(str(run_id))
+
+    # Restore the saved incident from actual PostgreSQL data.
+    restarted_worker._restore_active_incidents(connection)
+
+    assert restarted_worker.detector.has_active_incident(str(run_id))
+
+    restored = restarted_worker.detector.active_incidents[0]
+
+    assert restored.id == original_id
+    assert restored.started_at == started
+    assert restored.affected_entities == ["payment"]
+    assert restored.status == "open"
+
+    # Complete the experiment.
+    connection.execute(
+        """
+        UPDATE experiment_runs
+        SET status = 'completed', ended_at = %s
+        WHERE id = %s
+        """,
+        (started + timedelta(minutes=1), run_id),
+    )
+
+    # The restarted worker must resolve the original incident.
+    restarted_worker._resolve_terminal_active_incidents(connection)
+
+    connection.commit()
+
+    saved = connection.execute(
+        "SELECT id, status, ended_at FROM incidents WHERE id = %s",
+        (original_id,),
+    ).fetchone()
+
+    assert saved is not None
+    assert str(saved["id"]) == original_id
+    assert saved["status"] == "resolved"
+    assert saved["ended_at"] == started + timedelta(minutes=1)
+
+    # No duplicate incident was created.
+    count = connection.execute(
+        "SELECT COUNT(*) AS total FROM incidents WHERE run_id = %s",
+        (run_id,),
+    ).fetchone()["total"]
+
+    assert count == 1
+    assert not restarted_worker.detector.has_active_incident(str(run_id))

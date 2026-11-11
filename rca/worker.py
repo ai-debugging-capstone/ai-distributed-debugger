@@ -67,6 +67,7 @@ class WorkerSettings:
     database_url: str
     poll_seconds: float = 5.0
     bucket_seconds: int = 10
+    processing_delay_seconds: int = 0
     lookback_buckets: int = 30
     min_history_buckets: int = 10
     min_incident_buckets: int = 2
@@ -80,6 +81,9 @@ class WorkerSettings:
             database_url=database_url,
             poll_seconds=float(os.environ.get("RCA_POLL_SECONDS", "5")),
             bucket_seconds=int(os.environ.get("RCA_BUCKET_SECONDS", "10")),
+            processing_delay_seconds=int(
+                os.environ.get("RCA_PROCESSING_DELAY_SECONDS", "0")
+            ),
             lookback_buckets=int(os.environ.get("RCA_LOOKBACK_BUCKETS", "30")),
             min_history_buckets=int(os.environ.get("RCA_MIN_HISTORY_BUCKETS", "10")),
             min_incident_buckets=int(os.environ.get("RCA_MIN_INCIDENT_BUCKETS", "2")),
@@ -106,6 +110,8 @@ class RCAWorker:
     def __init__(self, settings: WorkerSettings) -> None:
         if not settings.database_url:
             raise ValueError("DATABASE_URL or --database-url is required")
+        if settings.processing_delay_seconds < 0:
+            raise ValueError("processing_delay_seconds must be non-negative")
         if settings.lookback_buckets < settings.min_history_buckets:
             raise ValueError("lookback must be at least min_history")
         if settings.analysis_engine not in {"dowhy", "champion", "heuristic"}:
@@ -115,7 +121,10 @@ class RCAWorker:
             lookback=settings.lookback_buckets,
             min_history=settings.min_history_buckets,
         )
-        self.detector = IncidentDetector(min_consecutive=settings.min_incident_buckets)
+        self.detector = IncidentDetector(
+            min_consecutive=settings.min_incident_buckets,
+            bucket_seconds=settings.bucket_seconds,
+        )
         baseline_ranker = HeuristicRootCauseRanker()
         if settings.analysis_engine == "dowhy":
             from .dowhy_engine import DoWhyRootCauseRanker
@@ -174,6 +183,13 @@ class RCAWorker:
             while not self._stopping and time.monotonic() < end:
                 time.sleep(min(0.25, end - time.monotonic()))
 
+    def _processing_cutoff(self, now: datetime) -> datetime:
+        """Return the latest bucket boundary eligible for processing."""
+        delayed_time = now - timedelta(
+            seconds=self.settings.processing_delay_seconds
+        )
+        return floor_time(delayed_time, self.settings.bucket_seconds)
+
     def run_once(self) -> int:
         with self._connect(self.settings.database_url) as connection:
             # Keep watermark discovery and raw-data fetches on one snapshot.  Under
@@ -191,9 +207,10 @@ class RCAWorker:
             watermarks = self._watermarks(connection)
             if not self._primed:
                 self._prime_history(connection)
+                self._restore_active_incidents(connection)
                 self._primed = True
             self._resolve_terminal_active_incidents(connection)
-            cutoff = floor_time(datetime.now(timezone.utc), self.settings.bucket_seconds)
+            cutoff = self._processing_cutoff(datetime.now(timezone.utc))
             start = self._raw_start(connection, watermarks)
             if start is None or start >= cutoff:
                 connection.commit()
@@ -257,7 +274,12 @@ class RCAWorker:
                     # reason during ranking. Persist that completed diagnosis.
                     self._persist_incident(connection, event)
                     if decision is not None:
-                        self._replace_rankings(connection, incident, decision.rankings)
+                        self._replace_rankings(
+                            connection,
+                            incident,
+                            decision.rankings,
+                            abstained=decision.abstained,
+)
             connection.commit()
             return len(processed_times)
 
@@ -350,6 +372,54 @@ class RCAWorker:
                 )
                 for row in cursor.fetchall()
             }
+
+    def _restore_active_incidents(self, connection: Any) -> None:
+        """Restore open incidents from PostgreSQL after a worker restart."""
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, run_id, status, started_at, detected_at,
+                       ended_at, severity, summary, trigger_entity,
+                       max_anomaly, affected_entities, metadata
+                FROM incidents
+                WHERE status = 'open' AND ended_at IS NULL
+                ORDER BY detected_at DESC
+                """
+            )
+            stored = cursor.fetchall()
+            seen_run_ids = set()
+
+        for row in stored:
+            run_id = str(row["run_id"]) if row["run_id"] is not None else None
+
+            if run_id in seen_run_ids or run_id in self.detector._active:
+                raise RuntimeError(
+                    f"Multiple open incidents found for run_id={run_id}"
+                )
+
+            seen_run_ids.add(run_id)
+
+        for row in stored:
+            run_id = str(row["run_id"]) if row["run_id"] is not None else None
+
+            incident = Incident(
+                id=str(row["id"]),
+                run_id=run_id,
+                status=row["status"],
+                started_at=row["started_at"],
+                detected_at=row["detected_at"],
+                ended_at=row["ended_at"],
+                severity=row["severity"],
+                summary=row["summary"],
+                trigger_entity=row["trigger_entity"],
+                max_anomaly=float(row["max_anomaly"]),
+                affected_entities=list(row["affected_entities"]),
+                metadata=dict(row["metadata"] or {}),
+            )
+
+            self.detector._active[run_id] = incident
+            self.detector._recovery[run_id] = 0
 
     def _resolve_terminal_active_incidents(self, connection: Any) -> None:
         active = self.detector.active_incidents
@@ -557,7 +627,7 @@ class RCAWorker:
             )
         return incident
 
-    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any]) -> None:
+    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any],*,abstained: bool = False,) -> None:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM evidence_items WHERE incident_id=%s", (incident.id,))
             cursor.execute("DELETE FROM candidate_rankings WHERE incident_id=%s", (incident.id,))
@@ -598,12 +668,21 @@ class RCAWorker:
                             evidence.contribution, _json(evidence.details),
                         ),
                     )
-            self._write_recommendation(cursor, incident, inserted)
+            self._write_recommendation(cursor, incident, inserted, abstained=abstained)
 
     @staticmethod
     def _write_recommendation(
-        cursor: Any, incident: Incident, inserted: Sequence[tuple[Any, int]]
+        cursor: Any,
+        incident: Incident,
+        inserted: Sequence[tuple[Any, int]],
+        *,
+        abstained: bool = False,
     ) -> None:
+        # An inconclusive diagnosis should not receive
+        # a cause-specific runbook recommendation.
+        if abstained:
+            return
+
         actionable = next(
             ((ranking, candidate_id) for ranking, candidate_id in inserted if ranking.entity_id != "inconclusive"),
             None,
@@ -653,6 +732,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--database-url", default=defaults.database_url)
     parser.add_argument("--poll-seconds", type=float, default=defaults.poll_seconds)
     parser.add_argument("--bucket-seconds", type=int, default=defaults.bucket_seconds)
+    parser.add_argument(
+        "--processing-delay-seconds",
+        type=int,
+        default=defaults.processing_delay_seconds,
+    )
     parser.add_argument("--lookback-buckets", type=int, default=defaults.lookback_buckets)
     parser.add_argument("--min-history-buckets", type=int, default=defaults.min_history_buckets)
     parser.add_argument("--min-incident-buckets", type=int, default=defaults.min_incident_buckets)
@@ -674,6 +758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_url=args.database_url,
             poll_seconds=args.poll_seconds,
             bucket_seconds=args.bucket_seconds,
+            processing_delay_seconds=args.processing_delay_seconds,
             lookback_buckets=args.lookback_buckets,
             min_history_buckets=args.min_history_buckets,
             min_incident_buckets=args.min_incident_buckets,

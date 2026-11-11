@@ -99,6 +99,28 @@ def test_bad_log_correlation_id_is_quarantined(field):
     assert len(rows) == len(rejected) == 1
     assert field in rejected[0]["reason"]
 
+@pytest.mark.parametrize("invalid_value", [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+])
+
+def test_nonfinite_log_attribute_is_quarantined_without_losing_valid_sibling(invalid_value):
+    sample = make_sample("log")
+
+    bad = sample.siblings.add()
+    bad.CopyFrom(sample.item)
+    bad.attributes.add(key="nonfinite").value.double_value = invalid_value
+
+    rows, rejected = sample.normalize(sample.request)
+
+    assert len(rows) == 1
+
+    assert len(rejected) == 1
+    assert rejected[0]["signal_type"] == "log"
+    assert "nonfinite numeric attribute" in rejected[0]["reason"]
+
+    assert "nonfinite" not in rows[0]["attributes"]
 
 @pytest.mark.parametrize("signal", ["span", "metric", "log"])
 def test_missing_resource_identity_and_invalid_run_id_have_safe_defaults(signal):
