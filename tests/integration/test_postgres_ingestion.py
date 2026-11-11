@@ -144,22 +144,31 @@ def test_retries_without_source_timestamps_are_deduplicated(postgres_api, signal
     assert len(rows(postgres_api, sample.table)) == 1
 
 
-def test_jsonb_storage_failure_rolls_back_valid_sibling_and_run_placeholder(postgres_api):
-    # Characterize an unresolved defect explicitly: OTLP nonfinite attributes
-    # reach JSONB and return 503 instead of per-record quarantine. This test
-    # checks transaction atomicity, not successful malformed-record handling.
+def test_nonfinite_log_is_quarantined_without_losing_valid_sibling(postgres_api):
     sample = make_sample("log")
+
     bad = sample.siblings.add()
     bad.CopyFrom(sample.item)
     bad.attributes.add(key="nonfinite").value.double_value = float("nan")
+
     response = post_sample(postgres_api, sample)
-    assert response.status_code == 503
-    assert response.json()["detail"] == "telemetry could not be persisted"
-    assert rows(postgres_api, "log_records") == []
-    assert rows(postgres_api, "rejected_records") == []
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-otlp-inserted"] == "1"
+    assert response.headers["x-otlp-rejected"] == "1"
+
+    parsed = sample.response_type.FromString(response.content)
+    assert getattr(parsed.partial_success, sample.partial_field) == 1
+
+    stored = rows(postgres_api, "log_records")
+    assert len(stored) == 1
+    assert "nonfinite" not in stored[0]["attributes"]
+
+    rejected = rows(postgres_api, "rejected_records")
+    assert len(rejected) == 1
+    assert rejected[0]["signal_type"] == "log"
+    assert "nonfinite numeric attribute" in rejected[0]["reason"]
+
     assert postgres_api.connection.execute(
         "SELECT id FROM experiment_runs WHERE id = %s", (RUN_ID,)
-    ).fetchone() is None
-    # The database/API remain usable after rollback.
-    del sample.siblings[1:]
-    assert post_sample(postgres_api, sample).headers["x-otlp-inserted"] == "1"
+    ).fetchone() is not None
