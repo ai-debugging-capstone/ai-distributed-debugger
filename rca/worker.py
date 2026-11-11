@@ -115,7 +115,10 @@ class RCAWorker:
             lookback=settings.lookback_buckets,
             min_history=settings.min_history_buckets,
         )
-        self.detector = IncidentDetector(min_consecutive=settings.min_incident_buckets)
+        self.detector = IncidentDetector(
+            min_consecutive=settings.min_incident_buckets,
+            bucket_seconds=settings.bucket_seconds,
+        )
         baseline_ranker = HeuristicRootCauseRanker()
         if settings.analysis_engine == "dowhy":
             from .dowhy_engine import DoWhyRootCauseRanker

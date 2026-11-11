@@ -52,6 +52,65 @@ class IncidentAndRankingTests(unittest.TestCase):
         self.assertEqual(resolved[0].action, "resolved")
         self.assertEqual(resolved[0].incident.status, "resolved")
 
+    # ck changes
+    def test_detector_does_not_count_anomalies_across_time_gaps(self) -> None:
+        detector = IncidentDetector(min_consecutive=2)
+
+        first = detector.update([self.anomaly("db", 0, 8)])
+        self.assertEqual(first, [])
+
+        after_gap = detector.update([self.anomaly("db", 30, 8)])
+        self.assertEqual(after_gap, [])
+
+        opened = detector.update([self.anomaly("db", 31, 8)])
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0].action, "opened")
+
+        expected_start = self.start + timedelta(seconds=300)
+        self.assertEqual(opened[0].incident.started_at, expected_start)
+
+    def test_detector_recovery_requires_consecutive_buckets(self) -> None:
+        detector = IncidentDetector(
+            min_consecutive=2,
+            recovery_consecutive=3,
+        )
+
+        detector.update([self.anomaly("db", 0, 8)])
+
+        opened = detector.update([self.anomaly("db", 1, 8)])
+        self.assertEqual(opened[0].action, "opened")
+
+        # First healthy observation
+        self.assertEqual(detector.update([self.anomaly("db", 2, 0)]), [])
+
+        # A gap should reset the recovery streak
+        self.assertEqual(detector.update([self.anomaly("db", 30, 0)]), [])
+        self.assertTrue(detector.has_active_incident("run-1"))
+
+        # Second healthy observation
+        self.assertEqual(detector.update([self.anomaly("db", 31, 0)]), [])
+        self.assertTrue(detector.has_active_incident("run-1"))
+
+        # Third healthy observation resolves the incident
+        resolved = detector.update([self.anomaly("db", 32, 0)])
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0].action, "resolved")
+        self.assertFalse(detector.has_active_incident("run-1"))
+
+    def test_detector_supports_custom_bucket_intervals(self) -> None:
+        detector = IncidentDetector(
+            min_consecutive=2,
+            bucket_seconds=20,
+        )
+
+        self.assertEqual(detector.update([self.anomaly("db", 0, 8)]), [])
+
+        # Offset 2 is 20 seconds after offset 0.
+        opened = detector.update([self.anomaly("db", 2, 8)])
+
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0].action, "opened")
+
     def test_ranker_prefers_early_upstream_candidate_with_evidence(self) -> None:
         graph = DirectedDependencyGraph(
             [
