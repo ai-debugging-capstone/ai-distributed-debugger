@@ -113,7 +113,13 @@ services:
     networks:
       - rca-shared
     logging: *default-logging
-
+  otel-storage-init:
+    image: alpine:3.20
+    user: "0:0"
+    command: ["chown", "10001:10001", "/storage"]
+    volumes:
+      - otel-gateway-storage:/storage
+    restart: "no"
   otel-gateway:
     image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.160.0
     container_name: rca-otel-gateway
@@ -127,6 +133,7 @@ services:
       RCA_EXPERIMENT_RUN_ID: ${RCA_EXPERIMENT_RUN_ID:-00000000-0000-0000-0000-000000000000}
     volumes:
       - "${OTEL_GATEWAY_CONFIG:-./infra/otel-collector/gateway.yaml}:/etc/otelcol-contrib/config.yaml:ro"
+      - otel-gateway-storage:/var/lib/otelcol/storage
     ports:
       - "${OTEL_GRPC_PORT:-4317}:4317"
       - "${OTEL_HTTP_PORT:-4318}:4318"
@@ -134,6 +141,8 @@ services:
     depends_on:
       rca-api:
         condition: service_healthy
+      otel-storage-init:
+        condition: service_completed_successfully
     networks:
       rca-shared:
         aliases:
@@ -182,6 +191,7 @@ volumes:
     name: ${POSTGRES_VOLUME:-telemetry-rca-postgres}
   grafana-data:
     name: ${GRAFANA_VOLUME:-telemetry-rca-grafana}
+  otel-gateway-storage:
 
 networks:
   rca-shared:
