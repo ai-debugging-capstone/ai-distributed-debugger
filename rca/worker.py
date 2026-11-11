@@ -67,6 +67,7 @@ class WorkerSettings:
     database_url: str
     poll_seconds: float = 5.0
     bucket_seconds: int = 10
+    processing_delay_seconds: int = 0
     lookback_buckets: int = 30
     min_history_buckets: int = 10
     min_incident_buckets: int = 2
@@ -80,6 +81,9 @@ class WorkerSettings:
             database_url=database_url,
             poll_seconds=float(os.environ.get("RCA_POLL_SECONDS", "5")),
             bucket_seconds=int(os.environ.get("RCA_BUCKET_SECONDS", "10")),
+            processing_delay_seconds=int(
+                os.environ.get("RCA_PROCESSING_DELAY_SECONDS", "0")
+            ),
             lookback_buckets=int(os.environ.get("RCA_LOOKBACK_BUCKETS", "30")),
             min_history_buckets=int(os.environ.get("RCA_MIN_HISTORY_BUCKETS", "10")),
             min_incident_buckets=int(os.environ.get("RCA_MIN_INCIDENT_BUCKETS", "2")),
@@ -106,6 +110,8 @@ class RCAWorker:
     def __init__(self, settings: WorkerSettings) -> None:
         if not settings.database_url:
             raise ValueError("DATABASE_URL or --database-url is required")
+        if settings.processing_delay_seconds < 0:
+            raise ValueError("processing_delay_seconds must be non-negative")
         if settings.lookback_buckets < settings.min_history_buckets:
             raise ValueError("lookback must be at least min_history")
         if settings.analysis_engine not in {"dowhy", "champion", "heuristic"}:
@@ -177,6 +183,13 @@ class RCAWorker:
             while not self._stopping and time.monotonic() < end:
                 time.sleep(min(0.25, end - time.monotonic()))
 
+    def _processing_cutoff(self, now: datetime) -> datetime:
+        """Return the latest bucket boundary eligible for processing."""
+        delayed_time = now - timedelta(
+            seconds=self.settings.processing_delay_seconds
+        )
+        return floor_time(delayed_time, self.settings.bucket_seconds)
+
     def run_once(self) -> int:
         with self._connect(self.settings.database_url) as connection:
             # Keep watermark discovery and raw-data fetches on one snapshot.  Under
@@ -197,7 +210,7 @@ class RCAWorker:
                 self._restore_active_incidents(connection)
                 self._primed = True
             self._resolve_terminal_active_incidents(connection)
-            cutoff = floor_time(datetime.now(timezone.utc), self.settings.bucket_seconds)
+            cutoff = self._processing_cutoff(datetime.now(timezone.utc))
             start = self._raw_start(connection, watermarks)
             if start is None or start >= cutoff:
                 connection.commit()
@@ -719,6 +732,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--database-url", default=defaults.database_url)
     parser.add_argument("--poll-seconds", type=float, default=defaults.poll_seconds)
     parser.add_argument("--bucket-seconds", type=int, default=defaults.bucket_seconds)
+    parser.add_argument(
+        "--processing-delay-seconds",
+        type=int,
+        default=defaults.processing_delay_seconds,
+    )
     parser.add_argument("--lookback-buckets", type=int, default=defaults.lookback_buckets)
     parser.add_argument("--min-history-buckets", type=int, default=defaults.min_history_buckets)
     parser.add_argument("--min-incident-buckets", type=int, default=defaults.min_incident_buckets)
@@ -740,6 +758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_url=args.database_url,
             poll_seconds=args.poll_seconds,
             bucket_seconds=args.bucket_seconds,
+            processing_delay_seconds=args.processing_delay_seconds,
             lookback_buckets=args.lookback_buckets,
             min_history_buckets=args.min_history_buckets,
             min_incident_buckets=args.min_incident_buckets,

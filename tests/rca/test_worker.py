@@ -101,6 +101,86 @@ class WorkerConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RCAWorker(WorkerSettings("postgresql://x", analysis_engine="typo"))
 
+    def test_processing_delay_changes_bucket_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                bucket_seconds=10,
+                processing_delay_seconds=30,
+            )
+        )
+
+        now = datetime(2026, 1, 1, 12, 0, 45, tzinfo=timezone.utc)
+
+        cutoff = worker._processing_cutoff(now)
+
+        self.assertEqual(
+            cutoff,
+            datetime(2026, 1, 1, 12, 0, 10, tzinfo=timezone.utc),
+        )
+
+    def test_zero_processing_delay_preserves_original_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                bucket_seconds=10,
+                processing_delay_seconds=0,
+            )
+        )
+
+        now = datetime(2026, 1, 1, 12, 0, 45, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            worker._processing_cutoff(now),
+            datetime(2026, 1, 1, 12, 0, 40, tzinfo=timezone.utc),
+        )
+
+    def test_processing_delay_configuration_and_validation(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RCA_PROCESSING_DELAY_SECONDS": "30"},
+        ):
+            settings = WorkerSettings.from_env()
+
+        self.assertEqual(settings.processing_delay_seconds, 30)
+
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            RCAWorker(
+                WorkerSettings(
+                    "postgresql://unused",
+                    analysis_engine="heuristic",
+                    processing_delay_seconds=-1,
+                )
+            )
+    def test_worker_uses_delayed_cutoff(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings(
+                "postgresql://unused",
+                analysis_engine="heuristic",
+                processing_delay_seconds=30,
+            )
+        )
+
+        result = self.anomaly("run-a", 0)
+        expected_cutoff = datetime(
+            2026, 1, 1, 12, 0, 10, tzinfo=timezone.utc
+        )
+
+        with patch.object(
+            worker, "_processing_cutoff", return_value=expected_cutoff
+        ) as cutoff:
+            with patch.object(
+                worker, "_raw_start", return_value=result.bucket.bucket_start
+            ):
+                processed = self.run_bucket(
+                    worker, result, RunLifecycle("running")
+                )
+
+        cutoff.assert_called_once()
+        self.assertEqual(processed, 1)
+
     def test_dowhy_selection_does_not_load_legacy_champion(self) -> None:
         with (
             patch("rca.dowhy_engine.DoWhyRootCauseRanker") as provider,
