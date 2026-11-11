@@ -229,6 +229,199 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(observed.score, 8.0)
         self.assertEqual(observed.onset_score, 5.0)
 
+    def test_restart_restores_open_incident_from_database(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            id="11111111-1111-1111-1111-111111111111",
+            run_id="22222222-2222-2222-2222-222222222222",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+            summary="Sustained anomaly affecting payment",
+            metadata={"detector": "robust-baseline-v1"},
+        )
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [{
+            "id": incident.id,
+            "run_id": incident.run_id,
+            "status": incident.status,
+            "started_at": incident.started_at,
+            "detected_at": incident.detected_at,
+            "ended_at": incident.ended_at,
+            "trigger_entity": incident.trigger_entity,
+            "affected_entities": incident.affected_entities,
+            "max_anomaly": incident.max_anomaly,
+            "severity": incident.severity,
+            "summary": incident.summary,
+            "metadata": incident.metadata,
+        }]
+
+        worker._restore_active_incidents(connection)
+
+        self.assertTrue(worker.detector.has_active_incident(incident.run_id))
+        restored = worker.detector.active_incidents[0]
+
+        self.assertEqual(restored.id, incident.id)
+        self.assertEqual(restored.started_at, incident.started_at)
+        self.assertEqual(restored.affected_entities, ["payment"])
+        self.assertEqual(restored.status, "open")
+
+    def test_restart_does_not_restore_resolved_incidents(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = []
+
+        worker._restore_active_incidents(connection)
+
+        self.assertEqual(worker.detector.active_incidents, ())
+
+        query = cursor.execute.call_args[0][0]
+        self.assertIn("status = 'open'", query)
+        self.assertIn("ended_at IS NULL", query)
+
+
+    def test_restart_rejects_duplicate_open_incidents_for_same_run(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        run_id = "22222222-2222-2222-2222-222222222222"
+
+        def stored_incident(incident_id):
+            return {
+                "id": incident_id,
+                "run_id": run_id,
+                "status": "open",
+                "started_at": started,
+                "detected_at": started + timedelta(seconds=10),
+                "ended_at": None,
+                "trigger_entity": "payment",
+                "affected_entities": ["payment"],
+                "max_anomaly": 8.0,
+                "severity": "warning",
+                "summary": "Sustained anomaly affecting payment",
+                "metadata": {},
+            }
+
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [
+            stored_incident("11111111-1111-1111-1111-111111111111"),
+            stored_incident("33333333-3333-3333-3333-333333333333"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Multiple open incidents"):
+            worker._restore_active_incidents(connection)
+
+        self.assertEqual(worker.detector.active_incidents, ())
+
+
+    def test_restored_incident_keeps_original_id_when_persisted(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        incident = Incident(
+            id="11111111-1111-1111-1111-111111111111",
+            run_id="22222222-2222-2222-2222-222222222222",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+        )
+
+        worker._identify_incident(incident)
+        original_id = incident.id
+
+        connection = MagicMock()
+
+        worker._persist_incident(
+            connection,
+            IncidentEvent("updated", incident),
+        )
+
+        self.assertEqual(incident.id, original_id)
+
+    def test_worker_restores_incidents_only_on_first_cycle(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        result = self.anomaly("run-a", 0)
+
+        with patch.object(worker, "_restore_active_incidents") as restore:
+            self.run_bucket(worker, result, RunLifecycle("running"))
+            self.run_bucket(worker, result, RunLifecycle("running"))
+
+        restore.assert_called_once()
+
+    def test_restored_incident_resolves_after_healthy_buckets(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+
+        # Simulate an incident loaded from PostgreSQL.
+        started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            run_id="run-a",
+            started_at=started,
+            detected_at=started + timedelta(seconds=10),
+            trigger_entity="payment",
+            affected_entities=["payment"],
+            max_anomaly=8.0,
+            severity="warning",
+            status="open",
+        )
+
+        worker._identify_incident(incident)
+        original_id = incident.id
+        worker.detector._active["run-a"] = incident
+
+        # Healthy results from three consecutive 10-second buckets.
+        for offset in (2, 3, 4):
+            result = self.anomaly("run-a", offset)
+            result = result.__class__(
+                bucket=result.bucket,
+                score=0.0,
+                onset_score=0.0,
+                feature_scores={},
+                baselines={},
+                contributions={},
+                sufficient_history=True,
+            )
+
+            mode, events = worker._incident_events_for_lifecycle(
+                [result], RunLifecycle("recovering")
+            )
+
+            self.assertEqual(mode, "recover")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].action, "resolved")
+        self.assertEqual(events[0].incident.id, original_id)
+        self.assertEqual(events[0].incident.status, "resolved")
+        self.assertFalse(worker.detector.has_active_incident("run-a"))
+
     def test_per_run_watermark_accepts_overlapping_historical_new_run(self) -> None:
         old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         newer = old + timedelta(days=3)

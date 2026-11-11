@@ -194,6 +194,7 @@ class RCAWorker:
             watermarks = self._watermarks(connection)
             if not self._primed:
                 self._prime_history(connection)
+                self._restore_active_incidents(connection)
                 self._primed = True
             self._resolve_terminal_active_incidents(connection)
             cutoff = floor_time(datetime.now(timezone.utc), self.settings.bucket_seconds)
@@ -358,6 +359,54 @@ class RCAWorker:
                 )
                 for row in cursor.fetchall()
             }
+
+    def _restore_active_incidents(self, connection: Any) -> None:
+        """Restore open incidents from PostgreSQL after a worker restart."""
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, run_id, status, started_at, detected_at,
+                       ended_at, severity, summary, trigger_entity,
+                       max_anomaly, affected_entities, metadata
+                FROM incidents
+                WHERE status = 'open' AND ended_at IS NULL
+                ORDER BY detected_at DESC
+                """
+            )
+            stored = cursor.fetchall()
+            seen_run_ids = set()
+
+        for row in stored:
+            run_id = str(row["run_id"]) if row["run_id"] is not None else None
+
+            if run_id in seen_run_ids or run_id in self.detector._active:
+                raise RuntimeError(
+                    f"Multiple open incidents found for run_id={run_id}"
+                )
+
+            seen_run_ids.add(run_id)
+
+        for row in stored:
+            run_id = str(row["run_id"]) if row["run_id"] is not None else None
+
+            incident = Incident(
+                id=str(row["id"]),
+                run_id=run_id,
+                status=row["status"],
+                started_at=row["started_at"],
+                detected_at=row["detected_at"],
+                ended_at=row["ended_at"],
+                severity=row["severity"],
+                summary=row["summary"],
+                trigger_entity=row["trigger_entity"],
+                max_anomaly=float(row["max_anomaly"]),
+                affected_entities=list(row["affected_entities"]),
+                metadata=dict(row["metadata"] or {}),
+            )
+
+            self.detector._active[run_id] = incident
+            self.detector._recovery[run_id] = 0
 
     def _resolve_terminal_active_incidents(self, connection: Any) -> None:
         active = self.detector.active_incidents
