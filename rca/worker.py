@@ -260,7 +260,12 @@ class RCAWorker:
                     # reason during ranking. Persist that completed diagnosis.
                     self._persist_incident(connection, event)
                     if decision is not None:
-                        self._replace_rankings(connection, incident, decision.rankings)
+                        self._replace_rankings(
+                            connection,
+                            incident,
+                            decision.rankings,
+                            abstained=decision.abstained,
+)
             connection.commit()
             return len(processed_times)
 
@@ -560,7 +565,7 @@ class RCAWorker:
             )
         return incident
 
-    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any]) -> None:
+    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any],*,abstained: bool = False,) -> None:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM evidence_items WHERE incident_id=%s", (incident.id,))
             cursor.execute("DELETE FROM candidate_rankings WHERE incident_id=%s", (incident.id,))
@@ -601,12 +606,21 @@ class RCAWorker:
                             evidence.contribution, _json(evidence.details),
                         ),
                     )
-            self._write_recommendation(cursor, incident, inserted)
+            self._write_recommendation(cursor, incident, inserted, abstained=abstained)
 
     @staticmethod
     def _write_recommendation(
-        cursor: Any, incident: Incident, inserted: Sequence[tuple[Any, int]]
+        cursor: Any,
+        incident: Incident,
+        inserted: Sequence[tuple[Any, int]],
+        *,
+        abstained: bool = False,
     ) -> None:
+        # An inconclusive diagnosis should not receive
+        # a cause-specific runbook recommendation.
+        if abstained:
+            return
+
         actionable = next(
             ((ranking, candidate_id) for ranking, candidate_id in inserted if ranking.entity_id != "inconclusive"),
             None,
