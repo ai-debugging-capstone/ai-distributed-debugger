@@ -6,7 +6,39 @@ networks:
     external: true
 
 services:
+  # Upstream sets restart: unless-stopped (flagd-ui: always), so Docker Desktop
+  # brings the Demo back on every launch. The scripts start it explicitly
+  # instead. Full-profile-only services are covered in compose.rca.full.yaml.
+  ad: {restart: "no"}
+  cart: {restart: "no"}
+  # checkout and product-catalog: upstream caps these Go services at 20 MiB
+  # with GOMEMLIMIT=16MiB. The cgroup also counts file-backed pages, so cold
+  # starts under load were OOM-killed (exit 137, OOMKilled=true). 40 MiB
+  # leaves real headroom for 40 MiB total.
+  checkout:
+    restart: "no"
+    deploy: {resources: {limits: {memory: 40M}}}
+  currency: {restart: "no"}
+  email: {restart: "no"}
+  frontend: {restart: "no"}
+  frontend-proxy: {restart: "no"}
+  image-provider: {restart: "no"}
+  load-generator: {restart: "no"}
+  payment: {restart: "no"}
+  product-catalog:
+    restart: "no"
+    deploy: {resources: {limits: {memory: 40M}}}
+  quote: {restart: "no"}
+  recommendation: {restart: "no"}
+  shipping: {restart: "no"}
+  flagd: {restart: "no"}
+  flagd-ui: {restart: "no"}
+  telemetry-docs: {restart: "no"}
+  astronomy-db: {restart: "no"}
+  valkey-cart: {restart: "no"}
+
   otel-collector:
+    restart: "no"
     environment:
       # Demo apps resolve this collector. Inside the collector, the receiver
       # must bind locally rather than trying to bind the Docker DNS name.

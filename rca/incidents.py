@@ -9,6 +9,7 @@ from datetime import datetime
 from itertools import groupby
 
 from .domain import AnomalyResult, Incident
+from .entities import DEFAULT_ROLES, EntityRoles
 
 
 def severity_from_score(score: float) -> str:
@@ -30,6 +31,18 @@ class IncidentDetector:
 
     The detector does not infer root cause.  Its only job is to suppress transient
     spikes and establish a bounded incident window for the ranking engine.
+
+    Only application entities participate (see :mod:`rca.entities`). Once an
+    incident is open, an entity outside its affected set must itself show a
+    sustained anomaly before it joins or keeps the incident alive; otherwise
+    unrelated single-bucket blips across many services grow the incident to
+    the whole system and prevent it from ever recovering.
+
+    A bucket in which a request-serving entity received no requests at all is
+    *no evidence* either way. A low-QPS service such as the Demo's payment sees
+    a failed charge, then often an empty bucket, then the next failure; such an
+    idle bucket neither breaks the anomaly streak nor counts toward recovery,
+    for at most ``max_idle_hold`` consecutive idle buckets.
     """
 
     def __init__(
@@ -38,9 +51,15 @@ class IncidentDetector:
         anomaly_threshold: float = 3.5,
         min_consecutive: int = 2,
         recovery_consecutive: int = 3,
+        max_idle_hold: int = 6,
+        roles: EntityRoles = DEFAULT_ROLES,
     ) -> None:
         if min_consecutive < 1 or recovery_consecutive < 1:
             raise ValueError("consecutive bucket counts must be positive")
+        if max_idle_hold < 0:
+            raise ValueError("max_idle_hold must be non-negative")
+        self.max_idle_hold = max_idle_hold
+        self.roles = roles
         self.anomaly_threshold = anomaly_threshold
         self.min_consecutive = min_consecutive
         self.recovery_consecutive = recovery_consecutive
@@ -48,6 +67,10 @@ class IncidentDetector:
         self._first_abnormal: dict[tuple[str | None, str], datetime] = {}
         self._active: dict[str | None, Incident] = {}
         self._recovery: dict[str | None, int] = defaultdict(int)
+        self._idle: dict[tuple[str | None, str], int] = defaultdict(int)
+        # Whether an entity's current anomaly streak came from request
+        # traffic; only those streaks are held across idle buckets.
+        self._request_streak: dict[tuple[str | None, str], bool] = {}
 
     @property
     def active_incidents(self) -> tuple[Incident, ...]:
@@ -57,6 +80,16 @@ class IncidentDetector:
         """Return whether ``run_id`` currently owns an open incident."""
 
         return run_id in self._active
+
+    def restore(self, incident: Incident) -> None:
+        """Re-adopt an incident persisted as open by a previous worker process.
+
+        Without this, a worker restart orphans every open incident: nothing in
+        memory owns it, so no amount of clean telemetry can ever resolve it.
+        """
+
+        self._active[incident.run_id] = incident
+        self._recovery[incident.run_id] = 0
 
     def resolve_active(
         self, run_id: str | None, resolved_at: datetime
@@ -77,6 +110,8 @@ class IncidentDetector:
         self._recovery.pop(run_id, None)
         for key in [key for key in self._streak if key[0] == run_id]:
             self._streak.pop(key, None)
+            self._idle.pop(key, None)
+            self._request_streak.pop(key, None)
             self._first_abnormal.pop(key, None)
         return IncidentEvent("resolved", active)
 
@@ -97,15 +132,33 @@ class IncidentDetector:
         run_id = next(iter(run_ids))
 
         anomalous: dict[str, AnomalyResult] = {}
+        held: set[str] = set()
         for result in results:
-            key = (run_id, result.bucket.entity_id)
+            entity = result.bucket.entity_id
+            if not self.roles.can_trigger_incident(entity):
+                continue
+            key = (run_id, entity)
             is_anomaly = result.sufficient_history and result.score >= self.anomaly_threshold
+            requests = result.bucket.value("request_count")
             if is_anomaly:
+                if self._streak[key] == 0:
+                    self._request_streak[key] = requests > 0
                 self._streak[key] += 1
+                self._idle[key] = 0
                 self._first_abnormal.setdefault(key, timestamp)
-                anomalous[result.bucket.entity_id] = result
+                anomalous[entity] = result
+            elif (
+                requests == 0
+                and self._streak[key] > 0
+                and self._request_streak.get(key, False)
+                and self._idle[key] < self.max_idle_hold
+            ):
+                self._idle[key] += 1
+                held.add(entity)
             else:
                 self._streak[key] = 0
+                self._idle[key] = 0
+                self._request_streak.pop(key, None)
                 self._first_abnormal.pop(key, None)
 
         confirmed = {
@@ -141,18 +194,18 @@ class IncidentDetector:
             events.append(IncidentEvent("opened", active))
         elif active is not None:
             changed = False
-            relevant_anomalous = anomalous
-            if not allow_growth:
-                relevant_anomalous = {
-                    entity: result
-                    for entity, result in anomalous.items()
-                    if entity in active.affected_entities
-                }
+            relevant_anomalous = {
+                entity: result
+                for entity, result in anomalous.items()
+                if entity in active.affected_entities
+                or (allow_growth and entity in confirmed)
+            }
             for entity, result in relevant_anomalous.items():
                 if entity not in active.affected_entities:
                     active.affected_entities.append(entity)
                     active.affected_entities.sort()
-                    active.metadata.setdefault("anomaly_times", {})[entity] = timestamp.isoformat()
+                    onset = self._first_abnormal.get((run_id, entity), timestamp)
+                    active.metadata.setdefault("anomaly_times", {})[entity] = onset.isoformat()
                     changed = True
                 if result.score > active.max_anomaly:
                     active.max_anomaly = result.score
@@ -169,6 +222,10 @@ class IncidentDetector:
                 # must not leave the opening candidate snapshot stale.
                 if changed or allow_growth:
                     events.append(IncidentEvent("updated", active))
+            elif held & set(active.affected_entities):
+                # An affected low-QPS service merely saw no traffic: no
+                # evidence of recovery yet.
+                pass
             else:
                 self._recovery[run_id] += 1
                 if self._recovery[run_id] >= self.recovery_consecutive:

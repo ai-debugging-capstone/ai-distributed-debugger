@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .domain import AnomalyResult, CandidateRanking, EvidenceItem, Incident
+from .entities import DEFAULT_ROLES, EntityRoles
 from .graph import DirectedDependencyGraph
 
 
@@ -83,7 +84,13 @@ def canonical_edge_fault_class(entity_id: str, result: AnomalyResult | None) -> 
     return base
 
 
-def canonical_node_semantics(entity_id: str, result: AnomalyResult | None) -> tuple[str, str]:
+def canonical_node_semantics(
+    entity_id: str,
+    result: AnomalyResult | None,
+    roles: EntityRoles = DEFAULT_ROLES,
+) -> tuple[str, str]:
+    if roles.is_workload(entity_id):
+        return "external", "workload_spike"
     lowered = entity_id.lower()
     features = result.feature_scores if result else {}
     latency_anomalous = any(
@@ -96,6 +103,11 @@ def canonical_node_semantics(entity_id: str, result: AnomalyResult | None) -> tu
     if entity_id == "external_workload":
         return "external", "workload_spike"
     return "service", _fault_class(result)
+
+
+# Robust z of the traffic source's request volume at which it earns full
+# temporal and propagation credit as the external workload candidate.
+WORKLOAD_TRAFFIC_Z = 3.5
 
 
 def _confidence(probability: float, margin: float, completeness: float) -> str:
@@ -124,7 +136,9 @@ class HeuristicRootCauseRanker:
         min_margin: float = 0.03,
         min_completeness: float = 0.40,
         model_version: str = "heuristic-v1",
+        roles: EntityRoles = DEFAULT_ROLES,
     ) -> None:
+        self.roles = roles
         total = anomaly_weight + temporal_weight + propagation_weight + quality_weight
         if not math.isclose(total, 1.0, abs_tol=1e-9):
             raise ValueError("ranking weights must sum to 1")
@@ -154,8 +168,11 @@ class HeuristicRootCauseRanker:
             and result.bucket.bucket_start >= incident.started_at
             and (incident.ended_at is None or result.bucket.bucket_start <= incident.ended_at)
         ]
+        roles = self.roles
         by_entity: dict[str, AnomalyResult] = {}
         for result in relevant:
+            if not roles.can_be_candidate(result.bucket.entity_id):
+                continue
             old = by_entity.get(result.bucket.entity_id)
             if old is None or result.score > old.score:
                 by_entity[result.bucket.entity_id] = result
@@ -163,16 +180,27 @@ class HeuristicRootCauseRanker:
         anomaly_times = {
             entity: parsed
             for entity, value in (incident.metadata.get("anomaly_times") or {}).items()
-            if (parsed := _parse_time(value)) is not None
+            if roles.can_be_candidate(entity) and (parsed := _parse_time(value)) is not None
         }
         for entity, result in by_entity.items():
             anomaly_times.setdefault(entity, result.bucket.bucket_start)
         earliest = min(anomaly_times.values(), default=incident.started_at)
 
+        # Observability plumbing and traffic sources are not "affected"
+        # components: they neither need explaining nor count as background.
+        non_application = {
+            entity
+            for entity in graph.nodes | set(by_entity) | set(incident.affected_entities)
+            if not roles.can_trigger_incident(entity)
+        }
+        affected = [
+            entity for entity in incident.affected_entities if entity not in non_application
+        ]
         candidates = set(by_entity) | set(incident.affected_entities)
         for entity in list(candidates):
             candidates.update(graph.ancestors(entity, max_depth=3))
             candidates.update(graph.descendants(entity, max_depth=3))
+        candidates = {entity for entity in candidates if roles.can_be_candidate(entity)}
         if not candidates:
             return self._fully_abstained("no candidates were observable")
 
@@ -180,15 +208,28 @@ class HeuristicRootCauseRanker:
         completeness_values: list[float] = []
         for entity in sorted(candidates):
             result = by_entity.get(entity)
-            anomaly = _bounded_anomaly(result.score if result else 0.0)
+            # A traffic source causes an incident only by sending more traffic.
+            # Its client-side latency and errors are symptoms of whatever is
+            # slow downstream, and because it reaches every service its timing
+            # and coverage would otherwise "explain" any incident at all.
+            traffic_evidence = 1.0
+            if roles.is_workload(entity):
+                traffic_z = result.feature_scores.get("request_count", 0.0) if result else 0.0
+                traffic_evidence = min(1.0, traffic_z / WORKLOAD_TRAFFIC_Z)
+                anomaly = _bounded_anomaly(traffic_z)
+            else:
+                anomaly = _bounded_anomaly(result.score if result else 0.0)
             onset = anomaly_times.get(entity)
             delay = max(0.0, (onset - earliest).total_seconds()) if onset else 300.0
-            temporal = math.exp(-delay / 60.0) if onset else 0.0
+            temporal = (math.exp(-delay / 60.0) if onset else 0.0) * traffic_evidence
             propagation, propagation_details = graph.propagation_score(
                 entity,
-                incident.affected_entities,
+                affected,
                 anomaly_times=anomaly_times,
+                direction="downstream" if roles.is_workload(entity) else "upstream",
+                ignored=non_application,
             )
+            propagation *= traffic_evidence
             quality = 0.0 if result is None else max(
                 0.0, 1.0 - sum(result.bucket.missingness.values()) / max(1, len(result.bucket.missingness))
             )
@@ -200,7 +241,7 @@ class HeuristicRootCauseRanker:
                 "quality": quality,
             }
             score = sum(self.weights[name] * value for name, value in components.items())
-            entity_type, fault_class = canonical_node_semantics(entity, result)
+            entity_type, fault_class = canonical_node_semantics(entity, result, roles)
             evidence = self._node_evidence(entity, result, onset, earliest, propagation, propagation_details)
             raw.append(
                 {
@@ -216,11 +257,18 @@ class HeuristicRootCauseRanker:
         # Edges are first-class candidates: dependency failures are often more
         # accurate than blaming either endpoint alone.
         for edge in graph.subgraph_edges(candidates):
+            # A traffic source is ranked as the workload node itself; its
+            # client edges would only duplicate that candidate.
+            if roles.is_workload(edge.source) or roles.is_workload(edge.target):
+                continue
             target_result = by_entity.get(edge.target)
             endpoint_anomaly = _bounded_anomaly(target_result.score if target_result else 0.0)
             edge_health = min(1.0, edge.error_rate * 4.0 + math.log1p(max(0.0, edge.latency_ms_p95)) / 20.0)
             propagation, details = graph.propagation_score(
-                edge.target, incident.affected_entities, anomaly_times=anomaly_times
+                edge.target,
+                affected,
+                anomaly_times=anomaly_times,
+                ignored=non_application,
             )
             onset = anomaly_times.get(edge.target) or anomaly_times.get(edge.source)
             delay = max(0.0, (onset - earliest).total_seconds()) if onset else 300.0

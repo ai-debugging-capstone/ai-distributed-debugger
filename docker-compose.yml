@@ -18,7 +18,7 @@ services:
   rca-db:
     image: postgres:17.6-alpine
     container_name: rca-db
-    restart: unless-stopped
+    restart: "no"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rca}
       POSTGRES_USER: ${POSTGRES_USER:-rca}
@@ -45,7 +45,7 @@ services:
       context: ./app
       dockerfile: Dockerfile
     container_name: rca-api
-    restart: unless-stopped
+    restart: "no"
     environment:
       <<: *database-environment
       HOST: 0.0.0.0
@@ -79,7 +79,7 @@ services:
       context: ./rca
       dockerfile: Dockerfile
     container_name: rca-worker
-    restart: unless-stopped
+    restart: "no"
     command:
       - python
       - -m
@@ -117,7 +117,7 @@ services:
   otel-gateway:
     image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.160.0
     container_name: rca-otel-gateway
-    restart: unless-stopped
+    restart: "no"
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     environment:
       RCA_API_OTLP_ENDPOINT: http://rca-api:8000
@@ -143,7 +143,7 @@ services:
   grafana:
     image: grafana/grafana:11.5.2
     container_name: rca-grafana
-    restart: unless-stopped
+    restart: "no"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}

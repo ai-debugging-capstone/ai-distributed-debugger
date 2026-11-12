@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
@@ -11,11 +12,11 @@ from typing import Any
 
 from .domain import DependencyEdge
 from .features import (
-    _as_datetime,
     _is_error_span,
     _span_duration_ms,
     floor_time,
     percentile,
+    span_event_time,
 )
 
 
@@ -46,6 +47,14 @@ def _normalise_rpc_service(value: Any, *, require_method_path: bool = False) -> 
     return service or None
 
 
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
 def _peer_service(span: Mapping[str, Any]) -> str | None:
     attrs = span.get("attributes") or {}
     for key in (
@@ -57,7 +66,11 @@ def _peer_service(span: Mapping[str, Any]) -> str | None:
         "messaging.destination.name",
     ):
         value = attrs.get(key)
-        if value:
+        # Demo gRPC clients record the resolved container IP as the server
+        # address. An IP names no service: it would become a phantom graph
+        # node (``checkout->172.19.0.25``) duplicating the real dependency, so
+        # fall through to the RPC service name instead.
+        if value and not _is_ip_literal(str(value)):
             return str(value)
     # An unreachable RPC target has no server span and may omit endpoint
     # attributes, but the client span still carries its qualified RPC service.
@@ -107,11 +120,12 @@ def build_dependency_edges(
         target = str(child.get("service_name") or "unknown")
         if source == target:
             continue
-        timestamp = child.get("start_time") or child.get("observed_at")
+        # Bucketed by completion, consistently with entity features.
+        timestamp = span_event_time(child)
         if timestamp is None:
             continue
         run_id = str(child["run_id"]) if child.get("run_id") else None
-        key = (run_id, floor_time(_as_datetime(timestamp), bucket_seconds), source, target)
+        key = (run_id, floor_time(timestamp, bucket_seconds), source, target)
         acc = grouped[key]
         acc.durations.append(_span_duration_ms(child))
         acc.errors += int(_is_error_span(child))
@@ -127,11 +141,11 @@ def build_dependency_edges(
             continue
         target = _peer_service(span)
         source = str(span.get("service_name") or "unknown")
-        timestamp = span.get("start_time") or span.get("observed_at")
+        timestamp = span_event_time(span)
         if not target or target == source or timestamp is None:
             continue
         run_id = str(span["run_id"]) if span.get("run_id") else None
-        key = (run_id, floor_time(_as_datetime(timestamp), bucket_seconds), source, target)
+        key = (run_id, floor_time(timestamp, bucket_seconds), source, target)
         acc = grouped[key]
         acc.durations.append(_span_duration_ms(span))
         acc.errors += int(_is_error_span(span))
@@ -255,15 +269,36 @@ class DirectedDependencyGraph:
         *,
         anomaly_times: Mapping[str, datetime] | None = None,
         decay: float = 0.7,
+        direction: str = "upstream",
+        ignored: Iterable[str] = (),
     ) -> tuple[float, dict[str, Any]]:
-        """Measure how well a candidate explains downstream affected entities."""
+        """Measure how well a candidate explains the affected entities.
 
-        affected_set = {entity for entity in affected if entity != candidate}
+        ``upstream`` (the default) is a dependency failure propagating back to
+        its callers. ``downstream`` is a traffic source whose load propagates to
+        the services it calls. ``ignored`` entities (observability plumbing and
+        workload sources) are neither explained nor counted as background.
+
+        Upstream coverage is chance-corrected: a shared dependency that nearly
+        every service calls (the Demo's flagd) trivially "explains" any affected
+        set. Its credit is scaled by the share of *unaffected* graph nodes that
+        do not reach it, so a hub only earns propagation credit when the impact
+        is actually concentrated on its callers.
+        """
+
+        if direction not in {"upstream", "downstream"}:
+            raise ValueError("direction must be 'upstream' or 'downstream'")
+        ignored_set = set(ignored)
+        affected_set = {
+            entity for entity in affected if entity != candidate and entity not in ignored_set
+        }
         if not affected_set:
             return 0.0, {"covered": [], "uncovered": [], "paths": {}}
         # Edges point caller -> dependency.  A broken dependency propagates back
         # toward its callers, so causal coverage follows reverse edges.
-        distances = self.ancestors(candidate)
+        distances = (
+            self.ancestors(candidate) if direction == "upstream" else self.descendants(candidate)
+        )
         covered = sorted(entity for entity in affected_set if entity in distances)
         paths = {entity: distances[entity] for entity in covered}
         weighted_coverage = sum(decay ** max(0, distances[entity] - 1) for entity in covered) / len(affected_set)
@@ -272,12 +307,24 @@ class DirectedDependencyGraph:
             start = anomaly_times[candidate]
             ordering = [1.0 if start <= anomaly_times.get(entity, start) else 0.0 for entity in covered]
             temporal_factor = sum(ordering) / len(ordering)
-        score = weighted_coverage * (0.5 + 0.5 * temporal_factor)
+        background_coverage = 0.0
+        if direction == "upstream":
+            background = [
+                node
+                for node in self.nodes
+                if node != candidate and node not in affected_set and node not in ignored_set
+            ]
+            if background:
+                background_coverage = sum(node in distances for node in background) / len(background)
+        specificity = 1.0 - background_coverage
+        score = weighted_coverage * specificity * (0.5 + 0.5 * temporal_factor)
         return score, {
             "covered": covered,
             "uncovered": sorted(affected_set - set(covered)),
             "paths": paths,
             "temporal_factor": temporal_factor,
+            "background_coverage": background_coverage,
+            "direction": direction,
         }
 
     def subgraph_edges(self, nodes: Iterable[str]) -> list[DependencyEdge]:

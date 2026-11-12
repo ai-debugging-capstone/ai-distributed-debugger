@@ -79,6 +79,42 @@ def _normalise_metric_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "unnamed"
 
 
+# Receivers and runtimes report CPU as both cumulative time counters (for
+# example ``jvm.cpu.time`` or ``container.cpu.usage.total`` in nanoseconds) and
+# utilization gauges. Only the gauges are a percentage; a counter sampled into
+# a bucket looks like a 10^5% CPU spike whenever it happens to be exported.
+_CPU_GAUGE_TOKENS = ("utilization", "percent")
+# Memory names that describe capacity, address space, or cumulative allocation
+# rather than the working set currently in use.
+_MEMORY_EXCLUDED_TOKENS = (
+    "limit",
+    "virtual",
+    "committed",
+    "peak",
+    "goal",
+    "available",
+    "fragmentation",
+    "allocat",
+    "evicted",
+    "rented",
+    "pooled",
+    "lua",
+    "percent",
+)
+
+
+def _is_cpu_utilization_metric(name: str) -> bool:
+    return "cpu" in name and any(token in name for token in _CPU_GAUGE_TOKENS)
+
+
+def _is_memory_usage_metric(name: str) -> bool:
+    if not any(token in name for token in ("memory", "working_set", "heap", "rss")):
+        return False
+    if any(token in name for token in _MEMORY_EXCLUDED_TOKENS):
+        return False
+    return any(token in name for token in ("usage", "used", "working_set", "rss"))
+
+
 def _is_error_span(span: Mapping[str, Any]) -> bool:
     status = str(span.get("status_code") or "").upper()
     if status in {"ERROR", "STATUS_CODE_ERROR", "2"}:
@@ -102,6 +138,24 @@ def _span_duration_ms(span: Mapping[str, Any]) -> float:
     if span.get("start_time") is not None and span.get("end_time") is not None:
         return max(0.0, (_as_datetime(span["end_time"]) - _as_datetime(span["start_time"])).total_seconds() * 1000)
     return 0.0
+
+
+def span_event_time(span: Mapping[str, Any]) -> datetime | None:
+    """When a span's outcome became observable: its end, not its start.
+
+    SDKs export a span only after it ends. Bucketing by start time files a
+    request that hung for minutes (the Demo's cartFailure EmptyCart hangs for
+    ~4 minutes before failing) into a bucket the worker scored long before
+    the span could possibly arrive, so its error was never seen.
+    """
+
+    if span.get("end_time") is not None:
+        return _as_datetime(span["end_time"])
+    start = span.get("start_time")
+    if start is not None:
+        return _as_datetime(start) + timedelta(milliseconds=_span_duration_ms(span))
+    observed = span.get("observed_at")
+    return _as_datetime(observed) if observed is not None else None
 
 
 def _is_error_log(log: Mapping[str, Any]) -> bool:
@@ -138,10 +192,10 @@ def aggregate_feature_buckets(
 
     for span in spans:
         service = str(span.get("service_name") or "unknown")
-        timestamp = span.get("start_time") or span.get("observed_at")
+        timestamp = span_event_time(span)
         if timestamp is None:
             continue
-        key = (str(span["run_id"]) if span.get("run_id") else None, floor_time(_as_datetime(timestamp), bucket_seconds), service)
+        key = (str(span["run_id"]) if span.get("run_id") else None, floor_time(timestamp, bucket_seconds), service)
         acc = grouped[key]
         duration = _span_duration_ms(span)
         if math.isfinite(duration):
@@ -198,11 +252,9 @@ def aggregate_feature_buckets(
             mean = statistics.fmean(values)
             features[f"metric.{name}.mean"] = mean
             features[f"metric.{name}.max"] = max(values)
-            if "cpu" in name and ("util" in name or "percent" in name or "time" in name):
+            if _is_cpu_utilization_metric(name):
                 features["cpu_percent"] = max(features["cpu_percent"], mean * 100 if 0 <= mean <= 1 else mean)
-            if any(token in name for token in ("memory", "working_set", "heap")) and any(
-                token in name for token in ("usage", "used", "bytes", "working_set", "heap")
-            ):
+            if _is_memory_usage_metric(name):
                 features["memory_bytes"] = max(features["memory_bytes"], mean)
             if "queue" in name and "lag" in name:
                 features["queue_lag"] = mean
@@ -230,8 +282,18 @@ def median_absolute_deviation(values: Sequence[float], center: float | None = No
     return statistics.median(abs(value - middle) for value in clean)
 
 
-def robust_z_score(value: float, history: Sequence[float], *, cap: float = 20.0) -> tuple[float, float]:
-    """Return (signed robust-z, median) with safe behavior for flat histories."""
+def robust_z_score(
+    value: float,
+    history: Sequence[float],
+    *,
+    cap: float = 20.0,
+    absolute_scale: float = 0.0,
+) -> tuple[float, float]:
+    """Return (signed robust-z, median) with safe behavior for flat histories.
+
+    ``absolute_scale`` is the smallest change, in the feature's own units, that
+    one z unit can represent; see :data:`ABSOLUTE_SCALE_FLOORS`.
+    """
 
     clean = [float(v) for v in history if math.isfinite(float(v))]
     if not clean or not math.isfinite(float(value)):
@@ -244,14 +306,62 @@ def robust_z_score(value: float, history: Sequence[float], *, cap: float = 20.0)
         # Keep the robust estimator, but require a modest relative noise floor.
         # Zero-centred failure signals such as error rate still use the absolute
         # floor below and therefore remain highly sensitive to first failures.
-        scale = max(mad / 0.6744897501960817, abs(center) * 0.02, 1e-6)
+        scale = max(mad / 0.6744897501960817, abs(center) * 0.02, absolute_scale, 1e-6)
     else:
         q75, q25 = percentile(clean, 0.75), percentile(clean, 0.25)
         iqr_scale = (q75 - q25) / 1.3489795003921634
         # Flat healthy series still needs to flag a meaningful departure.
-        scale = max(iqr_scale, abs(center) * 0.05, 1e-6)
+        scale = max(iqr_scale, abs(center) * 0.05, absolute_scale, 1e-6)
     score = (float(value) - center) / scale
     return max(-cap, min(cap, score)), center
+
+
+# Bucket latency percentiles are computed from a handful of requests for most
+# Demo services (a median of ~6 spans per 10 s bucket), so a single slow request
+# routinely moves p95 by hundreds of milliseconds on a healthy system. Scoring
+# those features against the median flags the service's normal tail as a fault.
+# They are instead scored against an upper historical reference, with a spread
+# taken from the tail itself and an absolute noise floor in milliseconds.
+TAIL_REFERENCE_FEATURES = frozenset({"latency_ms_p50", "latency_ms_p95", "latency_ms_p99"})
+TAIL_REFERENCE_QUANTILE = 0.90
+LATENCY_ABSOLUTE_SCALE_MS = 5.0
+# Smallest operationally meaningful change per z unit for the median-scored
+# features. A near-idle JVM moving from 0.01% to 0.03% CPU, or a single extra
+# ERROR log line, is not a 20-sigma event. Rates (error_rate) deliberately
+# have no floor so a first failed request on a quiet service stays visible.
+ABSOLUTE_SCALE_FLOORS: dict[str, float] = {
+    "cpu_percent": 5.0,
+    "error_count": 1.0,
+    "log_error_count": 2.0,
+}
+_GAUSSIAN_Q90_Z = 1.2815515655446004
+
+
+def robust_tail_z_score(
+    value: float,
+    history: Sequence[float],
+    *,
+    quantile: float = TAIL_REFERENCE_QUANTILE,
+    absolute_scale: float = LATENCY_ABSOLUTE_SCALE_MS,
+    cap: float = 20.0,
+) -> tuple[float, float]:
+    """Return (signed z above the historical tail, tail reference).
+
+    A value is unusual only when it exceeds what the entity's own recent tail
+    already reaches. Recurring healthy spikes raise both the reference and the
+    spread, while a sustained shift still clears both within a few buckets.
+    """
+
+    clean = [float(v) for v in history if math.isfinite(float(v))]
+    if not clean or not math.isfinite(float(value)):
+        return 0.0, 0.0
+    center = statistics.median(clean)
+    reference = percentile(clean, quantile)
+    mad_scale = median_absolute_deviation(clean, center) / 0.6744897501960817
+    tail_spread = max(0.0, reference - center) / _GAUSSIAN_Q90_Z
+    scale = max(mad_scale, tail_spread, abs(reference) * 0.10, absolute_scale, 1e-6)
+    score = (float(value) - reference) / scale
+    return max(-cap, min(cap, score)), reference
 
 
 DEFAULT_DIRECTIONS: dict[str, str] = {
@@ -324,7 +434,14 @@ def score_feature_bucket(
         historical = [item.value(name) for item in compatible if name in item.features]
         if len(historical) < min_history:
             continue
-        signed, baseline = robust_z_score(float(raw_value), historical)
+        if name in TAIL_REFERENCE_FEATURES:
+            signed, baseline = robust_tail_z_score(float(raw_value), historical)
+        else:
+            signed, baseline = robust_z_score(
+                float(raw_value),
+                historical,
+                absolute_scale=ABSOLUTE_SCALE_FLOORS.get(name, 0.0),
+            )
         direction = direction_map.get(name, "both")
         if direction == "high":
             severity = max(0.0, signed)
@@ -379,3 +496,15 @@ class StreamingAnomalyScorer:
         del self._history[key][:-self.lookback]
         self._previous_score[key] = result.score
         return result
+
+    def reset_run(self, run_id: str | None) -> None:
+        """Forget every entity baseline for one run.
+
+        Used after a telemetry gap (typically a stack restart): comparing fresh
+        process warm-up against a baseline from before the gap opens an
+        incident on every component at once.
+        """
+
+        for key in [key for key in self._history if key[0] == run_id]:
+            del self._history[key]
+            self._previous_score.pop(key, None)

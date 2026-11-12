@@ -94,6 +94,9 @@ function Get-DemoComposeArguments {
         $arguments += @("--file", (Join-Path $DemoDirectory "compose.full.yaml"))
     }
     $arguments += @("--file", (Join-Path $script:ProjectRoot "infra/demo/compose.rca.yaml"))
+    if ($Profile -eq "full") {
+        $arguments += @("--file", (Join-Path $script:ProjectRoot "infra/demo/compose.rca.full.yaml"))
+    }
     return $arguments
 }
 

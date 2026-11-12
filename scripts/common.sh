@@ -98,6 +98,9 @@ demo_compose_args() {
     DEMO_COMPOSE_ARGS+=(--file "${directory}/compose.full.yaml")
   fi
   DEMO_COMPOSE_ARGS+=(--file "${PROJECT_ROOT}/infra/demo/compose.rca.yaml")
+  if [[ "${profile}" == "full" ]]; then
+    DEMO_COMPOSE_ARGS+=(--file "${PROJECT_ROOT}/infra/demo/compose.rca.full.yaml")
+  fi
 }
 
 demo_profile_from_state() {

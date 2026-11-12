@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init config up down restart logs ps validate smoke demo-fetch demo-up demo-core demo-experiment demo-down dataset-export train clean-runtime
+.PHONY: help init config up down restart logs ps validate smoke demo-fetch demo-up demo-core demo-experiment demo-batch demo-down dataset-export train clean-runtime
 
 DATABASE_URL ?= postgresql://rca:rca-local-password@localhost:55432/rca
 DATASET ?= data/exports/candidates.jsonl
@@ -18,6 +18,7 @@ help:
 	@echo "  make demo-core   Start the smaller core demo"
 	@echo "  make smoke       Run a self-contained normalized-event RCA smoke test"
 	@echo "  make demo-experiment  Run a reversible payment-failure experiment"
+	@echo "  make demo-batch  Capture every scenario plus healthy controls (BATCH_ARGS=--dry-run)"
 	@echo "  make demo-down   Stop the demo safely"
 	@echo "  make dataset-export  Export completed labeled runs without split leakage"
 	@echo "  make train       Train and evaluate the portable baseline from DATASET"
@@ -59,6 +60,10 @@ smoke:
 
 demo-experiment:
 	./scripts/run-demo-experiment.sh
+
+BATCH_ARGS ?=
+demo-batch:
+	python scripts/run_demo_batch.py $(BATCH_ARGS)
 
 demo-down:
 	./scripts/stop-demo.sh

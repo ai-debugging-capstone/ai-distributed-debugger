@@ -22,7 +22,8 @@ while (($#)); do
     --recovery) recovery="$2"; shift ;;
     --acceptance-top-k) acceptance_top_k="$2"; shift ;;
     -h|--help)
-      printf 'Usage: %s [--scenario paymentFailure] [--variant 50%%] [--seed 42] [--split train|validation|test|holdout|unassigned] [--warmup 60] [--duration 120] [--recovery 60] [--acceptance-top-k 3]\n' "$0"
+      printf 'Usage: %s [--scenario paymentFailure|healthy-normal-load] [--variant 50%%] [--seed 42] [--split train|validation|test|holdout|unassigned] [--warmup 60] [--duration 120] [--recovery 60] [--acceptance-top-k 3]\n' "$0"
+      printf 'Healthy controls (healthy-normal-load, healthy-high-load, healthy-bursty-load) change no flag; --duration is their measurement hold.\n'
       exit 0
       ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
@@ -113,7 +114,14 @@ if ! docker compose "${DEMO_COMPOSE_ARGS[@]}" ps --status running --services | g
   exit 1
 fi
 
-original_variant="$(${python} "${SCRIPT_DIR}/demo_experiment.py" get-variant --file "${flag_file}" --flag "${scenario}")"
+scenario_kind="$(${python} "${SCRIPT_DIR}/demo_experiment.py" scenario-kind --scenario "${scenario}" --profile "${profile}")"
+if [[ "${scenario_kind}" == control ]]; then
+  # A healthy control changes no flag: it measures false alarms under load.
+  variant=none
+  original_variant=none
+else
+  original_variant="$(${python} "${SCRIPT_DIR}/demo_experiment.py" get-variant --file "${flag_file}" --flag "${scenario}")"
+fi
 experiment_id="$(${python} -c 'import uuid; print(uuid.uuid4())')"
 manifest_directory="${PROJECT_ROOT}/.runtime/experiments"
 manifest_file="${manifest_directory}/${experiment_id}.json"
@@ -140,6 +148,9 @@ ${python} "${SCRIPT_DIR}/demo_experiment.py" snapshot-file \
   --backup "${flag_backup_file}"
 
 restored=false
+if [[ "${scenario_kind}" == control ]]; then
+  restored=true
+fi
 completed=false
 reset_recorded=false
 previous_run_id_set="${RCA_EXPERIMENT_RUN_ID+x}"
@@ -218,20 +229,29 @@ sleep "${warmup}"
 # cannot predate their ground-truth interval.
 ${python} "${SCRIPT_DIR}/demo_experiment.py" mark-manifest --file "${manifest_file}" --status fault_active
 ${python} "${SCRIPT_DIR}/demo_experiment.py" sync-api --file "${manifest_file}" --api-url "${api_url}"
-${python} "${SCRIPT_DIR}/demo_experiment.py" set-variant --file "${flag_file}" --flag "${scenario}" --variant "${variant}"
-# flagd watches the mounted file. Restarting it creates a second, unrelated
-# outage that can outrank the intended injected cause.
-sleep 3
-printf 'Injected %s=%s for %ss. Built-in Locust traffic remains active.\n' "${scenario}" "${variant}" "${duration}"
-sleep "${duration}"
+if [[ "${scenario_kind}" == control ]]; then
+  printf 'Healthy control %s: holding its workload for %ss with every flag off...\n' "${scenario}" "${duration}"
+  ${python} "${SCRIPT_DIR}/demo_experiment.py" hold-workload --scenario "${scenario}" --seconds "${duration}"
+else
+  ${python} "${SCRIPT_DIR}/demo_experiment.py" set-variant --file "${flag_file}" --flag "${scenario}" --variant "${variant}"
+  # flagd watches the mounted file. Restarting it creates a second, unrelated
+  # outage that can outrank the intended injected cause.
+  sleep 3
+  printf 'Injected %s=%s for %ss. Built-in Locust traffic remains active.\n' "${scenario}" "${variant}" "${duration}"
+  sleep "${duration}"
+fi
 
 # The recovery boundary is the beginning of the restoration intervention.
 ${python} "${SCRIPT_DIR}/demo_experiment.py" mark-manifest --file "${manifest_file}" --status recovering
 ${python} "${SCRIPT_DIR}/demo_experiment.py" sync-api --file "${manifest_file}" --api-url "${api_url}"
-${python} "${SCRIPT_DIR}/demo_experiment.py" set-variant --file "${flag_file}" --flag "${scenario}" --variant "${original_variant}"
-sleep 3
-restored=true
-printf 'Restored %s=%s; observing recovery for %ss...\n' "${scenario}" "${original_variant}" "${recovery}"
+if [[ "${scenario_kind}" != control ]]; then
+  ${python} "${SCRIPT_DIR}/demo_experiment.py" set-variant --file "${flag_file}" --flag "${scenario}" --variant "${original_variant}"
+  sleep 3
+  restored=true
+  printf 'Restored %s=%s; observing recovery for %ss...\n' "${scenario}" "${original_variant}" "${recovery}"
+else
+  printf 'Control hold complete; observing recovery for %ss...\n' "${recovery}"
+fi
 sleep "${recovery}"
 
 printf 'Validating persisted telemetry and top-%s root-cause ranking...\n' "${acceptance_top_k}"

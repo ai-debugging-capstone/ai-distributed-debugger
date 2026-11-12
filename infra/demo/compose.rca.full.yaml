@@ -1,0 +1,7 @@
+# Loaded after compose.full.yaml by scripts/start-demo.{sh,ps1} for the full
+# profile only: these services do not exist in the core Compose model, so an
+# override for them in compose.rca.yaml would break the core profile.
+services:
+  accounting: {restart: "no"}
+  fraud-detection: {restart: "no"}
+  kafka: {restart: "no"}

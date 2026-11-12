@@ -216,6 +216,31 @@ The mounted flag file is applied by flagd's live file watcher. The runner does
 not restart flagd at fault boundaries, avoiding a second outage that would
 contaminate the causal ranking.
 
+Healthy controls use the same runner with every flag left off:
+`healthy-normal-load`, `healthy-high-load` (4x Locust users) and
+`healthy-bursty-load` (6x users, alternating every minute). A control never
+creates training labels. Each incident it opens is recorded as a false
+positive in its manifest.
+
+To capture a dataset, the batch runner plans every Docker-runnable scenario
+plus the three controls across several capture seeds. It assigns
+train/validation/test splits per whole run, interleaves scenarios so a partial
+batch stays balanced, and appends progress to a JSONL state file so it can
+resume:
+
+```powershell
+python scripts/run_demo_batch.py --dry-run              # print the plan and estimate
+python scripts/run_demo_batch.py --seeds 3              # strongest variant per scenario
+python scripts/run_demo_batch.py --variants all --holdout-scenario paymentUnreachable
+python scripts/run_demo_batch.py --state .runtime/batches/<file>.jsonl --retry-failed
+```
+
+Warm-up defaults to the experiment definition's 600 s, so the baseline is not
+built from post-restart settling. The runner refuses less than 120 s, because
+the worker needs ten closed buckets of baseline before the fault starts. The batch ends
+by printing hit@1 and top-k acceptance per scenario, alongside false-positive
+counts per control.
+
 ### 5. Optional: export a dataset and train the tabular comparison
 
 DoWhy uses its existing causal-analysis implementations and fits healthy

@@ -30,16 +30,24 @@ defaults:
 # entries describe the path we intend the fault to affect; they do not claim
 # that the runner restricts Locust to that path.
 
+# Controls change no flag. Locust users are a multiple of the Demo's running
+# baseline; bursty alternates elevated and baseline load. Every incident a
+# control opens is a measured false positive.
 healthy_controls:
   - key: healthy-normal-load
     workload: mixed-commerce
     hold_seconds: 600
+    users_multiplier: 1
   - key: healthy-high-load
     workload: sustained-high-volume
     hold_seconds: 600
+    users_multiplier: 4
   - key: healthy-bursty-load
     workload: burst-with-recovery
     hold_seconds: 600
+    users_multiplier: 6
+    burst_on_seconds: 60
+    burst_off_seconds: 60
 
 scenarios:
   - key: ad-service-error
@@ -164,7 +172,8 @@ scenarios:
     variants: ["on"]
     platform: docker
     injector: load-generator
-    causal_entity: {type: external, id: workload}
+    # The observable traffic source; ranked as the external workload candidate.
+    causal_entity: {type: external, id: load-generator}
     mechanism: workload_spike
     impacted_sli: frontend_latency
     intended_workload_exercise: homepage-flood

@@ -17,6 +17,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from .domain import AnomalyResult, DependencyEdge, FeatureBucket, Incident
+from .entities import EntityRoles
 from .features import StreamingAnomalyScorer, aggregate_feature_buckets, floor_time
 from .graph import DirectedDependencyGraph, build_dependency_edges
 from .incidents import IncidentDetector, IncidentEvent
@@ -35,6 +36,9 @@ TERMINAL_RUN_STATUSES = frozenset({"completed", "failed"})
 class RunLifecycle:
     status: str
     ended_at: datetime | None = None
+    # Exact intervention boundaries published by the experiment controller.
+    fault_started_at: datetime | None = None
+    fault_ended_at: datetime | None = None
 
 
 def incident_processing_mode(
@@ -42,6 +46,7 @@ def incident_processing_mode(
     lifecycle: RunLifecycle | None,
     *,
     has_active_incident: bool,
+    bucket_start: datetime | None = None,
 ) -> str:
     """Return ``detect``, ``recover``, or ``observe`` for one run bucket.
 
@@ -49,12 +54,24 @@ def incident_processing_mode(
     always-on behavior.  A non-null id without a matching lifecycle fails
     closed: PostgreSQL normally prevents that state through the foreign key,
     but opening an incident is the unsafe fallback if integrity is ever lost.
+
+    When the run publishes its fault window, a bucket is judged by *when it
+    happened*, not by the run's status when the worker gets to it. Buckets
+    are scored after an ingest grace period, so status-based gating would
+    detect on the last warm-up buckets (opening incidents before the fault)
+    and refuse to open on the fault's final buckets.
     """
 
     if run_id is None:
         return "detect"
     if lifecycle is None:
         return "observe"
+    if lifecycle.fault_started_at is not None and bucket_start is not None:
+        if bucket_start < lifecycle.fault_started_at:
+            return "observe"
+        if lifecycle.fault_ended_at is not None and bucket_start >= lifecycle.fault_ended_at:
+            return "recover" if has_active_incident else "observe"
+        return "detect"
     if lifecycle.status == "running":
         return "detect"
     if has_active_incident and lifecycle.status in {"recovering", *TERMINAL_RUN_STATUSES}:
@@ -72,6 +89,16 @@ class WorkerSettings:
     min_incident_buckets: int = 2
     model_path: str | None = None
     analysis_engine: str = "dowhy"
+    # A run whose telemetry stops for longer than this (normally a stack
+    # restart) starts a fresh baseline instead of comparing process warm-up
+    # against pre-gap history.
+    reset_gap_seconds: float = 60.0
+    # Telemetry reaches PostgreSQL seconds after the event (p95 ~10 s from span
+    # end in the Demo: SDK, Demo collector and gateway batching). A bucket is
+    # scored only once this much time has passed after it closed; scoring it
+    # earlier permanently drops every record that arrives later.
+    ingest_grace_seconds: float = 30.0
+    roles: EntityRoles = EntityRoles()
 
     @classmethod
     def from_env(cls) -> WorkerSettings:
@@ -85,6 +112,9 @@ class WorkerSettings:
             min_incident_buckets=int(os.environ.get("RCA_MIN_INCIDENT_BUCKETS", "2")),
             model_path=os.environ.get("RCA_MODEL_PATH") or None,
             analysis_engine=os.environ.get("RCA_ANALYSIS_ENGINE", "dowhy").strip().lower(),
+            reset_gap_seconds=float(os.environ.get("RCA_RESET_GAP_SECONDS", "60")),
+            ingest_grace_seconds=float(os.environ.get("RCA_INGEST_GRACE_SECONDS", "30")),
+            roles=EntityRoles.from_env(),
         )
 
 
@@ -115,8 +145,10 @@ class RCAWorker:
             lookback=settings.lookback_buckets,
             min_history=settings.min_history_buckets,
         )
-        self.detector = IncidentDetector(min_consecutive=settings.min_incident_buckets)
-        baseline_ranker = HeuristicRootCauseRanker()
+        self.detector = IncidentDetector(
+            min_consecutive=settings.min_incident_buckets, roles=settings.roles
+        )
+        baseline_ranker = HeuristicRootCauseRanker(roles=settings.roles)
         if settings.analysis_engine == "dowhy":
             from .dowhy_engine import DoWhyRootCauseRanker
 
@@ -138,6 +170,7 @@ class RCAWorker:
         self._primed = False
         self._recent_anomalies: dict[str | None, list[AnomalyResult]] = defaultdict(list)
         self._recent_edges: dict[str | None, list[DependencyEdge]] = defaultdict(list)
+        self._last_bucket: dict[str | None, datetime] = {}
         self._stopping = False
 
     @staticmethod
@@ -191,9 +224,14 @@ class RCAWorker:
             watermarks = self._watermarks(connection)
             if not self._primed:
                 self._prime_history(connection)
+                self._restore_open_incidents(connection)
                 self._primed = True
             self._resolve_terminal_active_incidents(connection)
-            cutoff = floor_time(datetime.now(timezone.utc), self.settings.bucket_seconds)
+            cutoff = floor_time(
+                datetime.now(timezone.utc)
+                - timedelta(seconds=self.settings.ingest_grace_seconds),
+                self.settings.bucket_seconds,
+            )
             start = self._raw_start(connection, watermarks)
             if start is None or start >= cutoff:
                 connection.commit()
@@ -227,6 +265,9 @@ class RCAWorker:
             ordered = sorted(buckets, key=lambda item: (item.run_id or "", item.bucket_start, item.entity_id))
             for (run_id, bucket_start), grouped in groupby(ordered, key=lambda item: (item.run_id, item.bucket_start)):
                 current = list(grouped)
+                self._handle_telemetry_gap(
+                    connection, run_id, bucket_start, watermarks.get(run_id)
+                )
                 graph = self._dependency_graph_at(
                     run_id,
                     bucket_start,
@@ -307,6 +348,7 @@ class RCAWorker:
             run_id,
             lifecycle,
             has_active_incident=self.detector.has_active_incident(run_id),
+            bucket_start=bucket_start,
         )
         if mode == "observe":
             # Warm-up data is intentionally scored and persisted so it trains
@@ -339,14 +381,19 @@ class RCAWorker:
             return {}
         with connection.cursor() as cursor:
             cursor.execute(
-                """SELECT id::text AS run_id, status, ended_at
+                """SELECT id::text AS run_id, status, ended_at,
+                          (configuration ->> 'fault_started_at')::timestamptz AS fault_started_at,
+                          (configuration ->> 'fault_ended_at')::timestamptz AS fault_ended_at
                    FROM experiment_runs
                    WHERE id = ANY(%s::uuid[])""",
                 (ids,),
             )
             return {
                 str(row["run_id"]): RunLifecycle(
-                    status=str(row["status"]), ended_at=row.get("ended_at")
+                    status=str(row["status"]),
+                    ended_at=row.get("ended_at"),
+                    fault_started_at=row.get("fault_started_at"),
+                    fault_ended_at=row.get("fault_ended_at"),
                 )
                 for row in cursor.fetchall()
             }
@@ -366,6 +413,99 @@ class RCAWorker:
             if event is not None:
                 self._persist_incident(connection, event)
 
+    def _handle_telemetry_gap(
+        self,
+        connection: Any,
+        run_id: str | None,
+        bucket_start: datetime,
+        watermark: datetime | None,
+    ) -> None:
+        """Start a fresh baseline after a run's telemetry stops and resumes.
+
+        A stack restart leaves a gap and then a burst of process warm-up
+        (cold caches, JIT, connection pools). Scoring it against pre-gap history
+        — possibly days old after a worker restart — opens an incident on every
+        component at once. Any open incident cannot have continued unobserved
+        across the gap either, so it is closed at the last bucket seen.
+        """
+
+        last = self._last_bucket.get(run_id, watermark)
+        self._last_bucket[run_id] = bucket_start
+        if last is None:
+            return
+        gap = (bucket_start - last).total_seconds()
+        if gap <= self.settings.reset_gap_seconds:
+            return
+        LOGGER.info(
+            "telemetry gap of %.0fs for run %s; resetting its baseline", gap, run_id
+        )
+        self.scorer.reset_run(run_id)
+        self._recent_anomalies.pop(run_id, None)
+        self._recent_edges.pop(run_id, None)
+        event = self.detector.resolve_active(
+            run_id, last + timedelta(seconds=self.settings.bucket_seconds)
+        )
+        if event is not None:
+            event.incident.metadata["resolution"] = "telemetry_gap"
+            self._persist_incident(connection, event)
+
+    def _restore_open_incidents(self, connection: Any) -> None:
+        """Adopt incidents a previous worker process left open.
+
+        The detector is in memory, so without this every worker restart orphans
+        open incidents permanently. The newest open incident per run is
+        re-adopted and can recover normally; any older ones for the same run
+        are closed at the last telemetry bucket before their successor began.
+        """
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT id::text AS id, run_id::text AS run_id, status, started_at,
+                          detected_at, ended_at, severity, summary, trigger_entity,
+                          max_anomaly, affected_entities, metadata
+                   FROM incidents WHERE status = 'open'
+                   ORDER BY run_id NULLS FIRST, started_at"""
+            )
+            rows = cursor.fetchall()
+        by_run: dict[str | None, list[Incident]] = defaultdict(list)
+        for row in rows:
+            by_run[row.get("run_id")].append(
+                Incident(
+                    started_at=row["started_at"],
+                    detected_at=row["detected_at"],
+                    trigger_entity=row["trigger_entity"],
+                    affected_entities=sorted(row.get("affected_entities") or []),
+                    max_anomaly=float(row.get("max_anomaly") or 0.0),
+                    severity=row["severity"],
+                    run_id=row.get("run_id"),
+                    id=row["id"],
+                    status=row["status"],
+                    summary=row.get("summary") or "",
+                    metadata=dict(row.get("metadata") or {}),
+                )
+            )
+        for run_id, incidents in by_run.items():
+            *superseded, newest = incidents
+            for incident, successor in zip(superseded, [*superseded[1:], newest]):
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT MAX(bucket_start) AS last_bucket FROM feature_buckets
+                           WHERE run_id IS NOT DISTINCT FROM %s
+                             AND bucket_start >= %s AND bucket_start < %s""",
+                        (run_id, incident.started_at, successor.started_at),
+                    )
+                    last_bucket = (cursor.fetchone() or {}).get("last_bucket")
+                incident.status = "resolved"
+                incident.ended_at = (
+                    last_bucket + timedelta(seconds=self.settings.bucket_seconds)
+                    if last_bucket
+                    else successor.started_at
+                )
+                incident.metadata["resolution"] = "superseded_after_worker_restart"
+                self._persist_incident(connection, IncidentEvent("resolved", incident))
+            self.detector.restore(newest)
+            LOGGER.info("re-adopted open incident %s for run %s", newest.id, run_id)
+
     def _watermarks(self, connection: Any) -> dict[str | None, datetime]:
         with connection.cursor() as cursor:
             cursor.execute("SELECT run_id, MAX(bucket_start) AS watermark FROM feature_buckets GROUP BY run_id")
@@ -383,9 +523,9 @@ class RCAWorker:
               FROM feature_buckets GROUP BY run_id
             )
             SELECT MIN(next_ts) AS start_at FROM (
-              SELECT MIN(s.start_time) AS next_ts
+              SELECT MIN(s.end_time) AS next_ts
               FROM spans s LEFT JOIN watermarks w ON w.run_id IS NOT DISTINCT FROM s.run_id
-              WHERE w.watermark IS NULL OR s.start_time >= w.watermark + %s
+              WHERE w.watermark IS NULL OR s.end_time >= w.watermark + %s
               UNION ALL
               SELECT MIN(COALESCE(m.time_unix, m.observed_at))
               FROM metric_points m LEFT JOIN watermarks w ON w.run_id IS NOT DISTINCT FROM m.run_id
@@ -459,7 +599,7 @@ class RCAWorker:
                 """SELECT trace_id,span_id,parent_span_id,service_name,operation_name,span_kind,
                           start_time,end_time,duration_ms,status_code,attributes,resource_attributes,
                           run_id,observed_at
-                   FROM spans WHERE start_time >= %s AND start_time < %s""",
+                   FROM spans WHERE end_time >= %s AND end_time < %s""",
                 (start, cutoff),
             )
             spans = cursor.fetchall()
@@ -531,7 +671,10 @@ class RCAWorker:
     @staticmethod
     def _identify_incident(incident: Incident) -> None:
         # A replay/restart must identify the same incident, not generate duplicates.
-        incident.id = str(uuid5(NAMESPACE_URL, f"rca:{incident.run_id}:{incident.started_at.isoformat()}:{incident.trigger_entity}"))
+        # Normalize to UTC so an incident re-read from PostgreSQL (whose session
+        # time zone may differ) maps back to the identical row.
+        started = incident.started_at.astimezone(timezone.utc).isoformat()
+        incident.id = str(uuid5(NAMESPACE_URL, f"rca:{incident.run_id}:{started}:{incident.trigger_entity}"))
 
     def _persist_incident(self, connection: Any, event: IncidentEvent) -> Incident:
         incident = event.incident

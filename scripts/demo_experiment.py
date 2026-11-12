@@ -9,7 +9,9 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "frontend_ad_availability",
         "intended_workload": "browse-products",
         "runbook": "service-error-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "adHighCpu": {
         "entity_type": "service",
@@ -43,6 +47,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "frontend_ad_latency",
         "intended_workload": "browse-products",
         "runbook": "resource-saturation-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "adManualGc": {
         "entity_type": "service",
@@ -51,6 +57,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "frontend_ad_latency",
         "intended_workload": "browse-products",
         "runbook": "resource-saturation-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "cartFailure": {
         "entity_type": "service",
@@ -59,6 +67,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "cart_operation_success",
         "intended_workload": "add-and-empty-cart",
         "runbook": "service-error-v1",
+        "variants": ("10%", "25%", "50%", "75%", "90%", "100%",),
+        "hold_seconds": 300,
     },
     "emailMemoryLeak": {
         "entity_type": "service",
@@ -67,6 +77,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "checkout_confirmation_latency",
         "intended_workload": "repeated-checkout",
         "runbook": "resource-saturation-v1",
+        "variants": ("1x", "10x", "100x", "1000x", "10000x",),
+        "hold_seconds": 900,
     },
     "failedReadinessProbe": {
         "entity_type": "instance",
@@ -76,6 +88,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "intended_workload": "cart-operations",
         "runbook": "service-error-v1",
         "platform": "kubernetes",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "imageSlowLoad": {
         "entity_type": "edge",
@@ -86,6 +100,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "page_render_latency",
         "intended_workload": "browse-products",
         "runbook": "dependency-unreachable-v1",
+        "variants": ("5sec", "10sec",),
+        "hold_seconds": 300,
     },
     "intlShippingSlowdown": {
         "entity_type": "service",
@@ -94,6 +110,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "international_checkout_latency",
         "intended_workload": "international-checkout",
         "runbook": "service-error-v1",
+        "variants": ("5sec", "10sec",),
+        "hold_seconds": 300,
     },
     "kafkaQueueProblems": {
         "entity_type": "queue",
@@ -103,14 +121,20 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "intended_workload": "repeated-checkout",
         "runbook": "queue-lag-v1",
         "required_profile": "full",
+        "variants": ("on",),
+        "hold_seconds": 600,
     },
     "loadGeneratorFloodHomepage": {
+        # The flood originates in Locust itself; the observable traffic source
+        # is the load-generator service, ranked as the external workload.
         "entity_type": "external",
-        "entity_id": "workload",
+        "entity_id": "load-generator",
         "mechanism": "workload_spike",
         "sli": "frontend_latency",
         "intended_workload": "homepage-flood",
         "runbook": "workload-spike-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "paymentFailure": {
         "entity_type": "service",
@@ -121,6 +145,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "checkout_success",
         "intended_workload": "repeated-checkout",
         "runbook": "service-error-v1",
+        "variants": ("10%", "25%", "50%", "75%", "90%", "100%",),
+        "hold_seconds": 300,
     },
     "paymentUnreachable": {
         "entity_type": "edge",
@@ -131,6 +157,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "checkout_success",
         "intended_workload": "repeated-checkout",
         "runbook": "dependency-unreachable-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "productCatalogFailure": {
         "entity_type": "service",
@@ -139,6 +167,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "product_detail_availability",
         "intended_workload": "targeted-product-OLJCESPC7Z",
         "runbook": "service-error-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
     "productCatalogLockContention": {
         "entity_type": "database",
@@ -149,6 +179,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "catalog_and_checkout_latency",
         "intended_workload": "browse-and-checkout",
         "runbook": "database-lock-contention-v1",
+        "variants": ("on",),
+        "hold_seconds": 600,
     },
     "recommendationCacheFailure": {
         "entity_type": "service",
@@ -157,8 +189,37 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sli": "recommendation_latency",
         "intended_workload": "browse-products",
         "runbook": "service-error-v1",
+        "variants": ("on",),
+        "hold_seconds": 300,
     },
 }
+
+# Mirrors healthy_controls in experiments/otel-demo-v3.1.0.yaml. A control runs
+# the same reset/warm-up/hold/recovery protocol with every flag left off. Any
+# incident it opens is a measured false positive, never ground truth. Locust
+# user counts are relative to the Demo's running baseline so a changed
+# LOCUST_USERS setting keeps the same shape.
+HEALTHY_CONTROLS: dict[str, dict[str, Any]] = {
+    "healthy-normal-load": {
+        "workload": "mixed-commerce",
+        "hold_seconds": 600,
+        "users_multiplier": 1,
+    },
+    "healthy-high-load": {
+        "workload": "sustained-high-volume",
+        "hold_seconds": 600,
+        "users_multiplier": 4,
+    },
+    "healthy-bursty-load": {
+        "workload": "burst-with-recovery",
+        "hold_seconds": 600,
+        "users_multiplier": 6,
+        "burst_on_seconds": 60,
+        "burst_off_seconds": 60,
+    },
+}
+CONTROL_VARIANT = "none"
+DEFAULT_LOADGEN_URL = "http://localhost:8080/loadgen"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -226,9 +287,23 @@ def restore_file(arguments: argparse.Namespace) -> None:
     arguments.backup.unlink()
 
 
+def is_control(scenario_name: str) -> bool:
+    return scenario_name in HEALTHY_CONTROLS
+
+
+def scenario_workloads(scenario_name: str, profile: str) -> tuple[str, str]:
+    """Return (actual workload, intended exercise) for a scenario or control."""
+
+    if is_control(scenario_name):
+        workload = str(HEALTHY_CONTROLS[scenario_name]["workload"])
+        return workload, workload
+    scenario = validate_scenario_profile(scenario_name, profile)
+    return ACTUAL_WORKLOAD, str(scenario["intended_workload"])
+
+
 def validate_scenario_profile(scenario_name: str, profile: str) -> dict[str, Any]:
     if scenario_name not in SCENARIOS:
-        available = ", ".join(sorted(SCENARIOS))
+        available = ", ".join(sorted([*SCENARIOS, *HEALTHY_CONTROLS]))
         raise SystemExit(
             f"No ground-truth mapping for {scenario_name!r}. Available: {available}"
         )
@@ -319,7 +394,10 @@ def sync_api(arguments: argparse.Namespace) -> None:
     ):
         raise SystemExit("Capture seed must be an integer from 0 through 2147483647")
     scenario_name = str(manifest["scenario"])
-    scenario = validate_scenario_profile(scenario_name, str(manifest["profile"]))
+    control = is_control(scenario_name)
+    actual_workload, intended_workload = scenario_workloads(
+        scenario_name, str(manifest["profile"])
+    )
     run_id = str(UUID(str(manifest["experiment_id"])))
     base_url = arguments.api_url.rstrip("/")
     status = {
@@ -339,7 +417,7 @@ def sync_api(arguments: argparse.Namespace) -> None:
         # The stock Demo load generator emits its weighted mix of commerce
         # paths. The scenario mapping below is an intended exercise, not proof
         # that the runner selected only that transaction path.
-        "workload": ACTUAL_WORKLOAD,
+        "workload": actual_workload,
         "split": (
             None
             if manifest.get("split", "unassigned") == "unassigned"
@@ -352,11 +430,13 @@ def sync_api(arguments: argparse.Namespace) -> None:
         else None,
         "configuration": {
             "profile": manifest["profile"],
-            "flag": scenario_name,
+            "kind": "control" if control else "fault",
+            "flag": None if control else scenario_name,
+            "scenario": scenario_name,
             "capture_seed": seed,
             "seed_semantics": "capture_partition_seed",
-            "actual_workload": ACTUAL_WORKLOAD,
-            "intended_scenario_exercise": scenario["intended_workload"],
+            "actual_workload": actual_workload,
+            "intended_scenario_exercise": intended_workload,
             "upstream_workload_rng_controlled": False,
             "reset_between_runs": True,
             "reset_completed_at": manifest["reset_completed_at"],
@@ -365,6 +445,16 @@ def sync_api(arguments: argparse.Namespace) -> None:
             "warmup_seconds": manifest["warmup_seconds"],
             "fault_seconds": manifest["fault_seconds"],
             "recovery_seconds": manifest["recovery_seconds"],
+            # Exact intervention (or control measurement) window. The worker
+            # judges each telemetry bucket against these, not against the
+            # run's status when the bucket happens to be scored. The API keeps
+            # configuration append-only, so each boundary is sent only once it
+            # exists; a null placeholder could never be filled in later.
+            **{
+                key: manifest[key]
+                for key in ("fault_started_at", "fault_ended_at")
+                if manifest.get(key)
+            },
         },
         "environment": {
             "collector": "rca-otel-gateway",
@@ -375,21 +465,34 @@ def sync_api(arguments: argparse.Namespace) -> None:
             "upstream_workload_rng_note": UPSTREAM_WORKLOAD_RNG_NOTE,
         },
     }
+    if control:
+        # Controls are evaluation data (false-positive rate), never ranking
+        # training rows: they carry no fault and no ground-truth labels.
+        run_payload["configuration"]["evaluation_role"] = "healthy_control"
+        run_payload["configuration"]["training_eligible"] = False
     if status in {"completed", "failed"}:
         acceptance = manifest.get("acceptance") or {}
         accepted = status == "completed" and acceptance.get("passed") is True
         run_payload["configuration"].update(
             {
-                "training_eligible": accepted,
+                "training_eligible": accepted and not control,
                 "capture_valid": accepted,
                 "acceptance": acceptance,
             }
         )
+        if control:
+            run_payload["configuration"]["false_positive_incidents"] = acceptance.get(
+                "false_positive_incidents"
+            )
         if not accepted:
             run_payload["configuration"]["failure_reason"] = manifest.get(
                 "failure_reason", "capture_aborted_before_acceptance"
             )
     request_json("POST", f"{base_url}/api/v1/experiments", run_payload)
+    if control:
+        print(json.dumps({"run_id": run_id, "status": status, "api": base_url}))
+        return
+    scenario = validate_scenario_profile(scenario_name, str(manifest["profile"]))
 
     # The injection interval is complete only after fault_ended_at is recorded.
     # Posting it once here avoids partial/duplicated ground-truth rows.
@@ -460,7 +563,18 @@ def sync_api(arguments: argparse.Namespace) -> None:
 
 def start_manifest(arguments: argparse.Namespace) -> None:
     experiment_id = str(UUID(str(arguments.experiment_id)))
-    scenario = validate_scenario_profile(arguments.scenario, arguments.profile)
+    actual_workload, intended_workload = scenario_workloads(
+        arguments.scenario, arguments.profile
+    )
+    control = is_control(arguments.scenario)
+    if control and (arguments.variant, arguments.original_variant) != (
+        CONTROL_VARIANT,
+        CONTROL_VARIANT,
+    ):
+        raise SystemExit(
+            f"Healthy control {arguments.scenario!r} changes no flag; "
+            f"use variant {CONTROL_VARIANT!r}"
+        )
     if not 0 <= arguments.seed <= 2_147_483_647:
         raise SystemExit("Capture seed must be an integer from 0 through 2147483647")
     manifest = {
@@ -473,9 +587,10 @@ def start_manifest(arguments: argparse.Namespace) -> None:
         "split": arguments.split,
         "seed_semantics": "capture_partition_seed",
         "scenario": arguments.scenario,
+        "kind": "control" if control else "fault",
         "workload": {
-            "actual": ACTUAL_WORKLOAD,
-            "intended_scenario_exercise": scenario["intended_workload"],
+            "actual": actual_workload,
+            "intended_scenario_exercise": intended_workload,
         },
         "upstream_workload_rng": {
             "generator": UPSTREAM_LOAD_GENERATOR,
@@ -558,7 +673,7 @@ def mark_manifest(arguments: argparse.Namespace) -> None:
     if timestamp_field:
         manifest[timestamp_field] = utc_now()
     if arguments.status == "completed":
-        manifest["training_eligible"] = True
+        manifest["training_eligible"] = manifest.get("kind") != "control"
         manifest["capture_valid"] = True
     elif arguments.status == "aborted":
         manifest["training_eligible"] = False
@@ -611,6 +726,10 @@ def accept_capture(arguments: argparse.Namespace) -> None:
         manifest["capture_valid"] = False
         atomic_write(arguments.file, manifest)
         raise
+
+    if is_control(str(manifest["scenario"])):
+        accept_control_capture(arguments, manifest, summary, run_id)
+        return
 
     scenario = validate_scenario_profile(
         str(manifest["scenario"]), str(manifest["profile"])
@@ -693,6 +812,142 @@ def accept_capture(arguments: argparse.Namespace) -> None:
     )
 
 
+def accept_control_capture(
+    arguments: argparse.Namespace,
+    manifest: dict[str, Any],
+    summary: dict[str, Any],
+    run_id: str,
+) -> None:
+    """A healthy control is valid when its telemetry persisted.
+
+    Incidents are the measurement, not a failure: each one opened during the
+    hold is recorded as a false positive so batch reports can state the
+    detector's false-alarm rate next to its hit rate.
+    """
+
+    telemetry = summary.get("telemetry") or {}
+    incidents = summary.get("incidents") or []
+    reasons = [
+        f"no persisted {signal_key} for run"
+        for signal_key in ("spans", "metric_points", "log_records")
+        if not _positive_count(telemetry.get(signal_key))
+    ]
+    passed = not reasons
+    manifest["acceptance"] = {
+        "passed": passed,
+        "checked_at": utc_now(),
+        "top_k": arguments.top_k,
+        "control": True,
+        "false_positive_incidents": len(incidents),
+        "incident_ids": [str(item.get("id")) for item in incidents],
+        "candidate_count": len(summary.get("candidates") or []),
+        "telemetry": telemetry,
+        "derived": summary.get("derived") or {},
+        "reasons": reasons,
+    }
+    manifest["training_eligible"] = False
+    manifest["capture_valid"] = passed
+    if reasons:
+        manifest["failure_reason"] = "capture_acceptance_failed: " + "; ".join(reasons)
+    else:
+        manifest.pop("failure_reason", None)
+    atomic_write(arguments.file, manifest)
+    if reasons:
+        raise SystemExit(manifest["failure_reason"])
+    print(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "accepted": True,
+                "control": True,
+                "false_positive_incidents": len(incidents),
+                "telemetry": telemetry,
+            }
+        )
+    )
+
+
+def scenario_kind(arguments: argparse.Namespace) -> None:
+    if is_control(arguments.scenario):
+        print("control")
+        return
+    validate_scenario_profile(arguments.scenario, arguments.profile)
+    print("fault")
+
+
+def _loadgen_request(
+    loadgen_url: str, path: str, form: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    url = f"{loadgen_url.rstrip('/')}/{path.lstrip('/')}"
+    request = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(form).encode("ascii") if form is not None else None,
+        headers={"Accept": "application/json"},
+        method="POST" if form is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError) as error:
+        raise SystemExit(f"Locust control request to {url} failed: {error}") from error
+
+
+def locust_user_count(loadgen_url: str) -> int:
+    stats = _loadgen_request(loadgen_url, "stats/requests")
+    users = stats.get("user_count")
+    if not isinstance(users, int) or isinstance(users, bool) or users < 1:
+        raise SystemExit(f"Locust reported no running users (state={stats.get('state')!r})")
+    return users
+
+
+def set_locust_users(loadgen_url: str, users: int) -> None:
+    if users < 1:
+        raise SystemExit("Locust user count must be positive")
+    # Spawn quickly so a burst edge is a step, not a slow ramp.
+    result = _loadgen_request(
+        loadgen_url, "swarm", {"user_count": users, "spawn_rate": max(1, users)}
+    )
+    if result.get("success") is False:
+        raise SystemExit(f"Locust refused user_count={users}: {result.get('message')}")
+
+
+def hold_workload(arguments: argparse.Namespace) -> None:
+    """Hold a control's load shape for the measurement window.
+
+    The Demo's running user count is the baseline and is always restored, even
+    when the hold is interrupted. A baseline-shaped control only sleeps.
+    """
+
+    if arguments.seconds < 0:
+        raise SystemExit("Hold seconds must be non-negative")
+    spec = HEALTHY_CONTROLS.get(arguments.scenario)
+    if spec is None:
+        raise SystemExit(f"{arguments.scenario!r} is not a healthy control")
+    multiplier = int(spec.get("users_multiplier", 1))
+    if multiplier == 1:
+        time.sleep(arguments.seconds)
+        return
+    baseline = arguments.baseline_users or locust_user_count(arguments.loadgen_url)
+    elevated = baseline * multiplier
+    deadline = time.monotonic() + arguments.seconds
+    try:
+        on_seconds = spec.get("burst_on_seconds")
+        off_seconds = spec.get("burst_off_seconds")
+        if not on_seconds:
+            set_locust_users(arguments.loadgen_url, elevated)
+            time.sleep(max(0.0, deadline - time.monotonic()))
+            return
+        while time.monotonic() < deadline:
+            set_locust_users(arguments.loadgen_url, elevated)
+            time.sleep(max(0.0, min(on_seconds, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
+            set_locust_users(arguments.loadgen_url, baseline)
+            time.sleep(max(0.0, min(off_seconds, deadline - time.monotonic())))
+    finally:
+        set_locust_users(arguments.loadgen_url, baseline)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
@@ -764,6 +1019,27 @@ def parser() -> argparse.ArgumentParser:
     accept_command.add_argument("--api-url", default="http://localhost:8000")
     accept_command.add_argument("--top-k", type=int, default=3)
     accept_command.set_defaults(function=accept_capture)
+
+    kind_command = commands.add_parser(
+        "scenario-kind", help="Print 'fault' or 'control' for a scenario name"
+    )
+    kind_command.add_argument("--scenario", required=True)
+    kind_command.add_argument("--profile", required=True)
+    kind_command.set_defaults(function=scenario_kind)
+
+    hold_command = commands.add_parser(
+        "hold-workload", help="Hold a healthy control's Locust load shape"
+    )
+    hold_command.add_argument("--scenario", required=True)
+    hold_command.add_argument("--seconds", type=int, required=True)
+    hold_command.add_argument("--loadgen-url", default=DEFAULT_LOADGEN_URL)
+    hold_command.add_argument(
+        "--baseline-users",
+        type=int,
+        default=None,
+        help="Restore target; defaults to Locust's running user count",
+    )
+    hold_command.set_defaults(function=hold_workload)
 
     sync_command = commands.add_parser(
         "sync-api", help="Persist run lineage, the fault interval, and ground truth"

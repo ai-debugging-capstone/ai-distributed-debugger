@@ -81,8 +81,17 @@ if ($LASTEXITCODE -ne 0 -or ($runningServices -split "`n") -notcontains "flagd")
 }
 
 $helper = Join-Path $PSScriptRoot "demo_experiment.py"
-$originalVariant = (& $python $helper get-variant --file $flagFile --flag $Scenario).Trim()
-if ($LASTEXITCODE -ne 0) { throw "Could not inspect feature flag $Scenario" }
+$scenarioKind = (& $python $helper scenario-kind --scenario $Scenario --profile $profile).Trim()
+if ($LASTEXITCODE -ne 0) { throw "Unknown or unsupported scenario $Scenario" }
+$isControl = $scenarioKind -eq "control"
+if ($isControl) {
+    # A healthy control changes no flag: it measures false alarms under load.
+    $Variant = "none"
+    $originalVariant = "none"
+} else {
+    $originalVariant = (& $python $helper get-variant --file $flagFile --flag $Scenario).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Could not inspect feature flag $Scenario" }
+}
 
 $experimentId = [guid]::NewGuid().ToString()
 $manifestDirectory = Join-Path $script:ProjectRoot ".runtime/experiments"
@@ -117,7 +126,7 @@ $platformCompose = @(
 )
 $apiPort = Get-ConfigValue -Name "RCA_API_PORT" -Default "8000"
 $apiUrl = "http://localhost:$apiPort"
-$restored = $false
+$restored = $isControl
 $completed = $false
 $resetRecorded = $false
 $runFailure = $null
@@ -147,13 +156,19 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not mark the experiment fault interval start" }
     & $python $helper sync-api --file $manifestFile --api-url $apiUrl
     if ($LASTEXITCODE -ne 0) { throw "Could not update experiment fault state" }
-    & $python $helper set-variant --file $flagFile --flag $Scenario --variant $Variant
-    if ($LASTEXITCODE -ne 0) { throw "Could not enable $Scenario=$Variant" }
-    # flagd's file provider watches the mounted JSON file and reloads it live.
-    # A restart creates an unrelated flagd outage and contaminates RCA labels.
-    Start-Sleep -Seconds 3
-    Write-Host "Injected $Scenario=$Variant for ${DurationSeconds}s. Built-in Locust traffic remains active."
-    Start-Sleep -Seconds $DurationSeconds
+    if ($isControl) {
+        Write-Host "Healthy control ${Scenario}: holding its workload for ${DurationSeconds}s with every flag off..."
+        & $python $helper hold-workload --scenario $Scenario --seconds $DurationSeconds
+        if ($LASTEXITCODE -ne 0) { throw "Could not hold the $Scenario workload" }
+    } else {
+        & $python $helper set-variant --file $flagFile --flag $Scenario --variant $Variant
+        if ($LASTEXITCODE -ne 0) { throw "Could not enable $Scenario=$Variant" }
+        # flagd's file provider watches the mounted JSON file and reloads it live.
+        # A restart creates an unrelated flagd outage and contaminates RCA labels.
+        Start-Sleep -Seconds 3
+        Write-Host "Injected $Scenario=$Variant for ${DurationSeconds}s. Built-in Locust traffic remains active."
+        Start-Sleep -Seconds $DurationSeconds
+    }
 
     # The recovery boundary is the beginning of the restoration intervention,
     # not the later moment at which the flagd restart finishes.
@@ -161,11 +176,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not mark the experiment recovery start" }
     & $python $helper sync-api --file $manifestFile --api-url $apiUrl
     if ($LASTEXITCODE -ne 0) { throw "Could not persist experiment fault interval" }
-    & $python $helper set-variant --file $flagFile --flag $Scenario --variant $originalVariant
-    if ($LASTEXITCODE -ne 0) { throw "Could not restore $Scenario" }
-    Start-Sleep -Seconds 3
-    $restored = $true
-    Write-Host "Restored $Scenario=$originalVariant; observing recovery for ${RecoverySeconds}s..."
+    if ($isControl) {
+        Write-Host "Control hold complete; observing recovery for ${RecoverySeconds}s..."
+    } else {
+        & $python $helper set-variant --file $flagFile --flag $Scenario --variant $originalVariant
+        if ($LASTEXITCODE -ne 0) { throw "Could not restore $Scenario" }
+        Start-Sleep -Seconds 3
+        $restored = $true
+        Write-Host "Restored $Scenario=$originalVariant; observing recovery for ${RecoverySeconds}s..."
+    }
     Start-Sleep -Seconds $RecoverySeconds
 
     Write-Host "Validating persisted telemetry and top-$AcceptanceTopK root-cause ranking..."
@@ -199,7 +218,11 @@ try {
 
     if (-not $restored) {
         try {
-            & docker @compose restart flagd *> $null
+            # Discard stdout only. Under Windows PowerShell 5.1 with
+            # ErrorActionPreference=Stop, redirecting a native command's
+            # stderr (*>) turns Compose's normal progress lines into a
+            # terminating error even when the command succeeded.
+            & docker @compose restart flagd | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "docker restart exited with code $LASTEXITCODE" }
         } catch {
             $message = "Could not restart flagd after emergency restoration: $($_.Exception.Message)"
@@ -239,7 +262,7 @@ try {
         Write-Warning $message
     }
     try {
-        & docker @platformCompose up --detach --force-recreate otel-gateway *> $null
+        & docker @platformCompose up --detach --force-recreate otel-gateway | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "docker compose exited with code $LASTEXITCODE" }
     } catch {
         $message = "Could not restore the gateway's pre-experiment run ID: $($_.Exception.Message)"
