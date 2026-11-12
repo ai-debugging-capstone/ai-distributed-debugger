@@ -285,7 +285,8 @@ class RCAWorker:
                 for event in events:
                     incident = event.incident
                     # Establish identity before provider caches/metadata use it.
-                    self._identify_incident(incident)
+                    if event.action == "opened":
+                        self._identify_incident(incident)
                     decision = None
                     if mode == "detect" and event.action in {"opened", "updated"}:
                         decision = self.ranker.rank(
@@ -685,7 +686,11 @@ class RCAWorker:
 
     def _persist_incident(self, connection: Any, event: IncidentEvent) -> Incident:
         incident = event.incident
-        self._identify_incident(incident)
+        if event.action == "opened":
+            # Every later event keeps the id the incident was opened or
+            # restored with: re-deriving it would aim at a different row
+            # whenever the stored id came from another release or time zone.
+            self._identify_incident(incident)
         with connection.cursor() as cursor:
             cursor.execute(
                 """INSERT INTO incidents

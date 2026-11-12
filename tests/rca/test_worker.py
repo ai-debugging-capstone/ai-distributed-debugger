@@ -154,6 +154,16 @@ class WorkerConfigurationTests(unittest.TestCase):
             ):
                 return worker.run_once()
 
+    def test_open_incidents_are_restored_only_on_the_first_cycle(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+        result = self.anomaly("run-a", 0)
+        with patch.object(worker, "_restore_open_incidents") as restore:
+            self.run_bucket(worker, result, RunLifecycle("running"))
+            self.run_bucket(worker, result, RunLifecycle("running"))
+        restore.assert_called_once()
+
     def test_warmup_reaches_provider_without_opening_an_incident(self) -> None:
         worker = RCAWorker(
             WorkerSettings("postgresql://unused", analysis_engine="heuristic")
