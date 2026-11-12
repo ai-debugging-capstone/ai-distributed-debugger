@@ -101,6 +101,12 @@ class WorkerConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RCAWorker(WorkerSettings("postgresql://x", analysis_engine="typo"))
 
+    def test_detector_uses_the_worker_bucket_size(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://x", analysis_engine="heuristic", bucket_seconds=20)
+        )
+        self.assertEqual(worker.detector.bucket_interval, timedelta(seconds=20))
+
     def test_dowhy_selection_does_not_load_legacy_champion(self) -> None:
         with (
             patch("rca.dowhy_engine.DoWhyRootCauseRanker") as provider,

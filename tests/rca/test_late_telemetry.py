@@ -137,6 +137,38 @@ class LowTrafficStreakTests(unittest.TestCase):
         detector.update([result("kafka", 1, 0, requests=0)])
         self.assertEqual(detector.update([result("kafka", 2, 15, requests=0)]), [])
 
+    def test_bucket_without_any_row_is_held_like_an_idle_bucket(self) -> None:
+        # payment sends nothing at all in bucket 1; cart keeps the run alive.
+        detector = IncidentDetector(min_consecutive=2)
+        self.assertEqual(detector.update([result("payment", 0, 20, requests=2)]), [])
+        self.assertEqual(detector.update([result("cart", 1, 0, requests=5)]), [])
+        opened = detector.update([result("payment", 2, 20, requests=1)])
+        self.assertEqual([event.action for event in opened], ["opened"])
+        self.assertEqual(opened[0].incident.started_at, START)
+
+    def test_silence_beyond_the_idle_budget_ends_the_streak(self) -> None:
+        detector = IncidentDetector(min_consecutive=2, max_idle_hold=2)
+        detector.update([result("payment", 0, 20, requests=2)])
+        # Buckets 1-3 are missing: three idle buckets exceed the budget of two.
+        self.assertEqual(detector.update([result("payment", 4, 20, requests=2)]), [])
+        opened = detector.update([result("payment", 5, 20, requests=2)])
+        self.assertEqual(opened[0].incident.started_at, START + timedelta(seconds=40))
+
+    def test_metric_only_streak_ends_at_a_missing_bucket(self) -> None:
+        detector = IncidentDetector(min_consecutive=2)
+        detector.update([result("kafka", 0, 15, requests=0)])
+        self.assertEqual(detector.update([result("kafka", 2, 15, requests=0)]), [])
+
+    def test_short_run_silence_pauses_recovery(self) -> None:
+        detector = IncidentDetector(min_consecutive=2, recovery_consecutive=3)
+        detector.update([result("payment", 0, 20, requests=2)])
+        detector.update([result("payment", 1, 20, requests=2)])
+        self.assertEqual(detector.update([result("payment", 2, 0, requests=2)]), [])
+        # Two silent buckets neither count toward recovery nor restart it.
+        self.assertEqual(detector.update([result("payment", 5, 0, requests=2)]), [])
+        resolved = detector.update([result("payment", 6, 0, requests=2)])
+        self.assertEqual([event.action for event in resolved], ["resolved"])
+
 
 class PilotRankingTests(unittest.TestCase):
     def test_ip_server_address_resolves_to_the_rpc_service(self) -> None:

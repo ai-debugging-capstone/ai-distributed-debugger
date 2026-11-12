@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import groupby
 
 from .domain import AnomalyResult, Incident
@@ -43,6 +43,13 @@ class IncidentDetector:
     a failed charge, then often an empty bucket, then the next failure; such an
     idle bucket neither breaks the anomaly streak nor counts toward recovery,
     for at most ``max_idle_hold`` consecutive idle buckets.
+
+    A bucket with no telemetry at all for an entity is an idle bucket too: a
+    request-driven streak is held across it within the same budget, and any
+    other streak ends. A longer silence is a telemetry gap, not evidence, so
+    anomalies on either side of it are never consecutive. Likewise a run-wide
+    silence of more than ``max_idle_hold`` buckets restarts the recovery count,
+    while a shorter one only pauses it.
     """
 
     def __init__(
@@ -53,13 +60,17 @@ class IncidentDetector:
         recovery_consecutive: int = 3,
         max_idle_hold: int = 6,
         roles: EntityRoles = DEFAULT_ROLES,
+        bucket_seconds: int = 10,
     ) -> None:
         if min_consecutive < 1 or recovery_consecutive < 1:
             raise ValueError("consecutive bucket counts must be positive")
         if max_idle_hold < 0:
             raise ValueError("max_idle_hold must be non-negative")
+        if bucket_seconds < 1:
+            raise ValueError("bucket_seconds must be positive")
         self.max_idle_hold = max_idle_hold
         self.roles = roles
+        self.bucket_interval = timedelta(seconds=bucket_seconds)
         self.anomaly_threshold = anomaly_threshold
         self.min_consecutive = min_consecutive
         self.recovery_consecutive = recovery_consecutive
@@ -71,6 +82,8 @@ class IncidentDetector:
         # Whether an entity's current anomaly streak came from request
         # traffic; only those streaks are held across idle buckets.
         self._request_streak: dict[tuple[str | None, str], bool] = {}
+        self._last_observed: dict[tuple[str | None, str], datetime] = {}
+        self._last_run_observed: dict[str | None, datetime] = {}
 
     @property
     def active_incidents(self) -> tuple[Incident, ...]:
@@ -108,12 +121,34 @@ class IncidentDetector:
         active.status = "resolved"
         active.ended_at = resolved_at
         self._recovery.pop(run_id, None)
+        self._last_run_observed.pop(run_id, None)
         for key in [key for key in self._streak if key[0] == run_id]:
             self._streak.pop(key, None)
             self._idle.pop(key, None)
             self._request_streak.pop(key, None)
             self._first_abnormal.pop(key, None)
+            self._last_observed.pop(key, None)
         return IncidentEvent("resolved", active)
+
+    def _missed_buckets(self, previous: datetime | None, timestamp: datetime) -> int | None:
+        """Return how many buckets passed unobserved between two observations.
+
+        ``None`` means they are not on one bucket grid (out of order, or a
+        different bucket size), so nothing links them.
+        """
+
+        if previous is None:
+            return 0
+        elapsed = timestamp - previous
+        if elapsed <= timedelta(0) or elapsed % self.bucket_interval:
+            return None
+        return elapsed // self.bucket_interval - 1
+
+    def _end_streak(self, key: tuple[str | None, str]) -> None:
+        self._streak[key] = 0
+        self._idle[key] = 0
+        self._request_streak.pop(key, None)
+        self._first_abnormal.pop(key, None)
 
     def update(
         self,
@@ -131,6 +166,13 @@ class IncidentDetector:
         timestamp = next(iter(timestamps))
         run_id = next(iter(run_ids))
 
+        missed = self._missed_buckets(self._last_run_observed.get(run_id), timestamp)
+        if missed is None or missed > self.max_idle_hold:
+            # Recovery evidence from before a long run-wide silence does not
+            # carry over; a short silence only pauses the count.
+            self._recovery[run_id] = 0
+        self._last_run_observed[run_id] = timestamp
+
         anomalous: dict[str, AnomalyResult] = {}
         held: set[str] = set()
         for result in results:
@@ -138,6 +180,20 @@ class IncidentDetector:
             if not self.roles.can_trigger_incident(entity):
                 continue
             key = (run_id, entity)
+            missed = self._missed_buckets(self._last_observed.get(key), timestamp)
+            self._last_observed[key] = timestamp
+            if missed != 0 and self._streak[key] > 0:
+                # Buckets with no row at all for this entity are idle buckets:
+                # held for a request-driven streak within the idle budget,
+                # otherwise a gap that ends the streak.
+                if (
+                    missed is not None
+                    and self._request_streak.get(key, False)
+                    and self._idle[key] + missed <= self.max_idle_hold
+                ):
+                    self._idle[key] += missed
+                else:
+                    self._end_streak(key)
             is_anomaly = result.sufficient_history and result.score >= self.anomaly_threshold
             requests = result.bucket.value("request_count")
             if is_anomaly:
@@ -156,10 +212,7 @@ class IncidentDetector:
                 self._idle[key] += 1
                 held.add(entity)
             else:
-                self._streak[key] = 0
-                self._idle[key] = 0
-                self._request_streak.pop(key, None)
-                self._first_abnormal.pop(key, None)
+                self._end_streak(key)
 
         confirmed = {
             entity: result
@@ -243,6 +296,7 @@ def detect_incidents(
     anomaly_threshold: float = 3.5,
     min_consecutive: int = 2,
     recovery_consecutive: int = 3,
+    bucket_seconds: int = 10,
 ) -> list[Incident]:
     """Replay helper that returns all incidents, including still-open incidents."""
 
@@ -250,6 +304,7 @@ def detect_incidents(
         anomaly_threshold=anomaly_threshold,
         min_consecutive=min_consecutive,
         recovery_consecutive=recovery_consecutive,
+        bucket_seconds=bucket_seconds,
     )
     ordered = sorted(results, key=lambda r: (r.bucket.run_id or "", r.bucket.bucket_start, r.bucket.entity_id))
     incidents: dict[str, Incident] = {}

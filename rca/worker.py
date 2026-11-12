@@ -146,7 +146,9 @@ class RCAWorker:
             min_history=settings.min_history_buckets,
         )
         self.detector = IncidentDetector(
-            min_consecutive=settings.min_incident_buckets, roles=settings.roles
+            min_consecutive=settings.min_incident_buckets,
+            roles=settings.roles,
+            bucket_seconds=settings.bucket_seconds,
         )
         baseline_ranker = HeuristicRootCauseRanker(roles=settings.roles)
         if settings.analysis_engine == "dowhy":
