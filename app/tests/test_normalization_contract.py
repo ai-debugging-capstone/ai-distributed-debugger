@@ -15,6 +15,8 @@ from tests.telemetry_samples import (
     add_attributes, make_sample, set_value,
 )
 
+RESOURCE_GROUPS = {"span": "resource_spans", "metric": "resource_metrics", "log": "resource_logs"}
+
 
 @pytest.mark.parametrize("signal", ["span", "metric", "log"])
 def test_metadata_and_recursive_attribute_types_survive_normalization(signal):
@@ -121,6 +123,37 @@ def test_nonfinite_log_attribute_is_quarantined_without_losing_valid_sibling(inv
     assert "nonfinite numeric attribute" in rejected[0]["reason"]
 
     assert "nonfinite" not in rows[0]["attributes"]
+
+
+@pytest.mark.parametrize("signal", ["span", "metric", "log"])
+def test_nonfinite_resource_attribute_quarantines_only_that_resources_records(signal):
+    sample = make_sample(signal)
+    groups = getattr(sample.request, RESOURCE_GROUPS[signal])
+    bad = groups.add()
+    bad.CopyFrom(groups[0])
+    bad.resource.attributes.add(key="nonfinite").value.double_value = float("nan")
+
+    rows, rejected = sample.normalize(sample.request)
+
+    assert len(rows) == len(rejected) == 1
+    assert rejected[0]["signal_type"] == signal
+    assert "invalid resource attribute: nonfinite numeric attribute" in rejected[0]["reason"]
+    assert rejected[0]["payload"]["service_name"] == "payment"
+    assert "nonfinite" not in rows[0]["resource_attributes"]
+
+
+def test_nonfinite_attribute_on_the_first_metric_point_is_quarantined():
+    sample = make_sample("metric")
+    valid = sample.siblings.add()
+    valid.CopyFrom(sample.item)
+    sample.item.attributes.add(key="nonfinite").value.double_value = float("nan")
+
+    rows, rejected = sample.normalize(sample.request)
+
+    assert len(rows) == len(rejected) == 1
+    assert "nonfinite numeric attribute" in rejected[0]["reason"]
+    assert rejected[0]["payload"]["service_name"] == "payment"
+
 
 @pytest.mark.parametrize("signal", ["span", "metric", "log"])
 def test_missing_resource_identity_and_invalid_run_id_have_safe_defaults(signal):

@@ -156,12 +156,16 @@ explicit distinction between evaluator tests and real RCA accuracy measurement.
 
 ### Existing limitations
 
-`test_jsonb_storage_failure_rolls_back_valid_sibling_and_run_placeholder` deliberately
-verifies a known failure mode: an OTLP NaN attribute reaches JSONB, returns HTTP
-503, and rolls back even a valid sibling. It proves atomic rollback and recovery,
-not good malformed-record quarantine. Per-record handling of nonfinite values is
-still a follow-up defect. The repaired malformed-ID/empty-point cases do exercise
-successful quarantine alongside valid records.
+Nonfinite attribute values (NaN, Infinity) are quarantined, not stored, because
+JSONB cannot hold them. One in a record's attributes rejects only that record; one
+in a resource's attributes rejects every record under that resource. Valid
+siblings are still inserted and the response reports the rejections through OTLP
+partial success instead of failing the request
+(`test_nonfinite_log_is_quarantined_without_losing_valid_sibling` and the
+`nonfinite` cases in `app/tests/test_normalization_contract.py`). This replaces
+the earlier characterization that expected HTTP 503 and a rolled-back batch. The
+repaired malformed-ID/empty-point cases also exercise quarantine alongside valid
+records.
 
 Identical payloads without source timestamps now deduplicate across retries; they
 cannot distinguish two separate identical occurrences. Producers should send

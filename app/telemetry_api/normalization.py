@@ -207,18 +207,41 @@ def _rejection(signal_type: str, reason: str, payload: dict[str, Any]) -> dict[s
     }
 
 
+def _resource_attributes(resource: Any) -> tuple[dict[str, Any], str | None]:
+    """Convert resource attributes, reporting an invalid one instead of raising.
+
+    Every record under a resource inherits its attributes, so an invalid
+    resource attribute quarantines those records rather than failing the
+    whole request. The valid attributes still identify the service in each
+    rejection.
+    """
+
+    try:
+        return key_values_to_dict(resource.attributes), None
+    except ValueError as exc:
+        valid: dict[str, Any] = {}
+        for item in resource.attributes:
+            try:
+                valid[item.key] = any_value_to_python(item.value)
+            except ValueError:
+                continue
+        return valid, f"invalid resource attribute: {exc}"
+
+
 def normalize_trace_request(request: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     observed_at = utc_now()
 
     for resource_spans in request.resource_spans:
-        resource_attributes = key_values_to_dict(resource_spans.resource.attributes)
+        resource_attributes, resource_error = _resource_attributes(resource_spans.resource)
         service_name, namespace, instance_id = _resource_identity(resource_attributes)
         for scope_spans in resource_spans.scope_spans:
             scope_name, scope_version = _scope_fields(scope_spans.scope)
             for span in scope_spans.spans:
                 try:
+                    if resource_error is not None:
+                        raise ValueError(resource_error)
                     trace_id = bytes_to_hex(span.trace_id)
                     span_id = bytes_to_hex(span.span_id)
                     if trace_id is None or len(trace_id) != 32:
@@ -296,7 +319,7 @@ def normalize_metric_request(request: Any) -> tuple[list[dict[str, Any]], list[d
     observed_at = utc_now()
 
     for resource_metrics in request.resource_metrics:
-        resource_attributes = key_values_to_dict(resource_metrics.resource.attributes)
+        resource_attributes, resource_error = _resource_attributes(resource_metrics.resource)
         resource_service_name = _metric_service_name(resource_attributes, {})
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
@@ -315,7 +338,12 @@ def normalize_metric_request(request: Any) -> tuple[list[dict[str, Any]], list[d
                     continue
                 data = getattr(metric, metric_type)
                 for point in data.data_points:
+                    # The rejection below needs a service even when the point's
+                    # own attributes are what failed.
+                    service_name = resource_service_name
                     try:
+                        if resource_error is not None:
+                            raise ValueError(resource_error)
                         attributes = key_values_to_dict(point.attributes)
                         service_name = _metric_service_name(
                             resource_attributes, attributes
@@ -413,11 +441,13 @@ def normalize_log_request(request: Any) -> tuple[list[dict[str, Any]], list[dict
     received_at = utc_now()
 
     for resource_logs in request.resource_logs:
-        resource_attributes = key_values_to_dict(resource_logs.resource.attributes)
+        resource_attributes, resource_error = _resource_attributes(resource_logs.resource)
         service_name, _, _ = _resource_identity(resource_attributes)
         for scope_logs in resource_logs.scope_logs:
             for log_record in scope_logs.log_records:
                 try:
+                    if resource_error is not None:
+                        raise ValueError(resource_error)
                     attributes = key_values_to_dict(log_record.attributes)
                     trace_id = bytes_to_hex(log_record.trace_id)
                     span_id = bytes_to_hex(log_record.span_id)
