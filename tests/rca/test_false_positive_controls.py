@@ -349,10 +349,40 @@ class WorkerLifecycleTests(unittest.TestCase):
 
         active = worker.detector.active_incidents
         self.assertEqual([incident.trigger_entity for incident in active], ["checkout"])
+        self.assertEqual(active[0].id, "id-checkout")
         persisted = [params for query, params in connection.queries if "INSERT INTO incidents" in query]
         self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0][0], "id-image-provider")
         self.assertEqual(persisted[0][2], "resolved")
         self.assertEqual(persisted[0][5], old_start + timedelta(minutes=5, seconds=10))
+
+    def test_restored_incident_keeps_its_stored_id(self) -> None:
+        # An id written by an older release, read back in a non-UTC session.
+        started = START.astimezone(timezone(timedelta(hours=-5)))
+        connection = _Connection([{
+            "id": "legacy-id",
+            "run_id": "live",
+            "status": "open",
+            "started_at": started,
+            "detected_at": started,
+            "ended_at": None,
+            "severity": "warning",
+            "summary": "",
+            "trigger_entity": "cart",
+            "max_anomaly": 9.0,
+            "affected_entities": ["cart"],
+            "metadata": {},
+        }])
+        worker = self.worker()
+        worker._restore_open_incidents(connection)
+        restored = worker.detector.active_incidents[0]
+
+        worker._persist_incident(connection, IncidentEvent("updated", restored))
+        resolved = worker.detector.resolve_active("live", START + timedelta(minutes=1))
+        worker._persist_incident(connection, resolved)
+
+        persisted = [params[0] for query, params in connection.queries if "INSERT INTO incidents" in query]
+        self.assertEqual(persisted, ["legacy-id", "legacy-id"])
 
     def test_persisted_identity_is_stable_across_time_zones(self) -> None:
         worker = self.worker()

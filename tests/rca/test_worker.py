@@ -101,6 +101,12 @@ class WorkerConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RCAWorker(WorkerSettings("postgresql://x", analysis_engine="typo"))
 
+    def test_detector_uses_the_worker_bucket_size(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://x", analysis_engine="heuristic", bucket_seconds=20)
+        )
+        self.assertEqual(worker.detector.bucket_interval, timedelta(seconds=20))
+
     def test_dowhy_selection_does_not_load_legacy_champion(self) -> None:
         with (
             patch("rca.dowhy_engine.DoWhyRootCauseRanker") as provider,
@@ -147,6 +153,16 @@ class WorkerConfigurationTests(unittest.TestCase):
                 worker, "_incident_events_for_lifecycle", return_value=("detect", events)
             ):
                 return worker.run_once()
+
+    def test_open_incidents_are_restored_only_on_the_first_cycle(self) -> None:
+        worker = RCAWorker(
+            WorkerSettings("postgresql://unused", analysis_engine="heuristic")
+        )
+        result = self.anomaly("run-a", 0)
+        with patch.object(worker, "_restore_open_incidents") as restore:
+            self.run_bucket(worker, result, RunLifecycle("running"))
+            self.run_bucket(worker, result, RunLifecycle("running"))
+        restore.assert_called_once()
 
     def test_warmup_reaches_provider_without_opening_an_incident(self) -> None:
         worker = RCAWorker(
@@ -419,6 +435,40 @@ class WorkerConfigurationTests(unittest.TestCase):
         self.assertEqual(cursor.queries[0][1][0], "service_error")
         self.assertIn("INSERT INTO recommendations", cursor.queries[1][0])
 
+    #CK changes
+    def test_abstained_decision_does_not_attach_runbook(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "id": "runbook-id",
+            "title": "Investigate a service error",
+            "entity_type": "service",
+        }
+
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        incident = Incident(
+            when, when, "checkout", ["checkout"], 8, "warning"
+        )
+
+        ranking = CandidateRanking(
+            "service",
+            "checkout",
+            1,
+            0.9,
+            0.8,
+            "high",
+            "service_error",
+            "error_rate=0.9",
+        )
+
+        RCAWorker._write_recommendation(
+            cursor,
+            incident,
+            [(ranking, 123)],
+            abstained=True,
+        )
+
+        cursor.execute.assert_not_called()
+
     def test_attribution_recommendation_preserves_unknown_probability(self) -> None:
         cursor = MagicMock()
         cursor.fetchone.return_value = {
@@ -496,6 +546,77 @@ class WorkerConfigurationTests(unittest.TestCase):
         )
         self.assertIsNone(external_insert[1][5])
         self.assertEqual(json.loads(external_insert[1][-1]), {})
+
+    def test_abstained_ranking_replacement_does_not_create_recommendation(self) -> None:
+            class Cursor:
+                def __init__(self):
+                    self.queries = []
+                    self.next_row = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def execute(self, query, params):
+                    normalized = " ".join(query.split())
+                    self.queries.append((normalized, params))
+
+                    if "INSERT INTO candidate_rankings" in normalized:
+                        self.next_row = {"id": 123}
+                    elif "SELECT id, title, entity_type FROM runbooks" in normalized:
+                        self.next_row = {
+                            "id": "runbook-id",
+                            "title": "Investigate a service error",
+                            "entity_type": "service",
+                        }
+
+                def fetchone(self):
+                    return self.next_row
+
+            class Connection:
+                def __init__(self):
+                    self.the_cursor = Cursor()
+
+                def cursor(self):
+                    return self.the_cursor
+
+            when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            incident = Incident(
+                when, when, "checkout", ["checkout"], 8, "warning"
+            )
+
+            ranking = CandidateRanking(
+                "service", "checkout", 1, 0.9, 0.8,
+                "high", "service_error", "error_rate=0.9",
+            )
+
+            connection = Connection()
+            worker = RCAWorker.__new__(RCAWorker)
+
+            worker._replace_rankings(
+                connection,
+                incident,
+                [ranking],
+                abstained=True,
+            )
+
+            queries = [query for query, _ in connection.the_cursor.queries]
+
+            self.assertTrue(
+                any("DELETE FROM candidate_rankings" in query for query in queries)
+            )
+            self.assertTrue(
+                any("INSERT INTO candidate_rankings" in query for query in queries)
+            )
+            self.assertFalse(
+                any("INSERT INTO recommendations" in query for query in queries)
+            )
+            self.assertFalse(
+                any("SELECT id, title, entity_type FROM runbooks" in query for query in queries)
+            )
+
 
 
 if __name__ == "__main__":

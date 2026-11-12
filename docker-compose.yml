@@ -89,6 +89,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       RCA_POLL_SECONDS: ${RCA_POLL_SECONDS:-5}
       RCA_BUCKET_SECONDS: ${RCA_BUCKET_SECONDS:-10}
+      RCA_INGEST_GRACE_SECONDS: ${RCA_INGEST_GRACE_SECONDS:-30}
+      RCA_RESET_GAP_SECONDS: ${RCA_RESET_GAP_SECONDS:-60}
       RCA_LOOKBACK_BUCKETS: ${RCA_LOOKBACK_BUCKETS:-30}
       RCA_MIN_HISTORY_BUCKETS: ${RCA_MIN_HISTORY_BUCKETS:-10}
       # Two closed 10-second buckets still suppress one-off spikes, while
@@ -97,6 +99,7 @@ services:
       RCA_MIN_INCIDENT_BUCKETS: ${RCA_MIN_INCIDENT_BUCKETS:-2}
       RCA_ANALYSIS_ENGINE: ${RCA_ANALYSIS_ENGINE:-dowhy}
       RCA_MODEL_PATH: ${RCA_MODEL_PATH:-/app/artifacts/champion/model.json}
+      RCA_LOG_RETENTION_DAYS: ${RCA_LOG_RETENTION_DAYS:-30}
     volumes:
       - ./artifacts:/app/artifacts:ro
     depends_on:
@@ -114,6 +117,19 @@ services:
       - rca-shared
     logging: *default-logging
 
+  otel-storage-init:
+    # The Collector runs as UID 10001, but Docker creates a new named volume
+    # owned by root; hand the queue directory over before the gateway starts.
+    image: alpine:3.20
+    user: "0:0"
+    command: ["chown", "10001:10001", "/storage"]
+    volumes:
+      - otel-gateway-storage:/storage
+    restart: "no"
+    networks:
+      - rca-shared
+    logging: *default-logging
+
   otel-gateway:
     image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.160.0
     container_name: rca-otel-gateway
@@ -127,6 +143,7 @@ services:
       RCA_EXPERIMENT_RUN_ID: ${RCA_EXPERIMENT_RUN_ID:-00000000-0000-0000-0000-000000000000}
     volumes:
       - "${OTEL_GATEWAY_CONFIG:-./infra/otel-collector/gateway.yaml}:/etc/otelcol-contrib/config.yaml:ro"
+      - otel-gateway-storage:/var/lib/otelcol/storage
     ports:
       - "${OTEL_GRPC_PORT:-4317}:4317"
       - "${OTEL_HTTP_PORT:-4318}:4318"
@@ -134,6 +151,8 @@ services:
     depends_on:
       rca-api:
         condition: service_healthy
+      otel-storage-init:
+        condition: service_completed_successfully
     networks:
       rca-shared:
         aliases:
@@ -182,6 +201,7 @@ volumes:
     name: ${POSTGRES_VOLUME:-telemetry-rca-postgres}
   grafana-data:
     name: ${GRAFANA_VOLUME:-telemetry-rca-grafana}
+  otel-gateway-storage:
 
 networks:
   rca-shared:

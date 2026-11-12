@@ -50,6 +50,27 @@ def test_otlp_trace_ingestion_returns_protobuf_response(client, fake_storage):
     assert row["operation_name"] == "POST /checkout"
 
 
+def test_invalid_resource_attribute_is_quarantined_not_a_server_error(client, fake_storage):
+    request = _trace_export()
+    bad = request.resource_spans.add()
+    bad.CopyFrom(request.resource_spans[0])
+    bad.resource.attributes.add(key="ratio").value.double_value = float("nan")
+
+    response = client.post(
+        "/otlp/v1/traces",
+        content=request.SerializeToString(),
+        headers={"Content-Type": "application/x-protobuf"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-otlp-rejected"] == "1"
+    parsed = ExportTraceServiceResponse()
+    parsed.ParseFromString(response.content)
+    assert parsed.partial_success.rejected_spans == 1
+    assert len(fake_storage.batches[0]["span"]) == 1
+    assert "nonfinite numeric attribute" in fake_storage.rejections[0]["reason"]
+
+
 def test_canonical_otlp_alias_accepts_gzip(client, fake_storage):
     payload = gzip.compress(_trace_export().SerializeToString())
 

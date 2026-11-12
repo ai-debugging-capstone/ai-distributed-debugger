@@ -146,7 +146,9 @@ class RCAWorker:
             min_history=settings.min_history_buckets,
         )
         self.detector = IncidentDetector(
-            min_consecutive=settings.min_incident_buckets, roles=settings.roles
+            min_consecutive=settings.min_incident_buckets,
+            roles=settings.roles,
+            bucket_seconds=settings.bucket_seconds,
         )
         baseline_ranker = HeuristicRootCauseRanker(roles=settings.roles)
         if settings.analysis_engine == "dowhy":
@@ -283,7 +285,8 @@ class RCAWorker:
                 for event in events:
                     incident = event.incident
                     # Establish identity before provider caches/metadata use it.
-                    self._identify_incident(incident)
+                    if event.action == "opened":
+                        self._identify_incident(incident)
                     decision = None
                     if mode == "detect" and event.action in {"opened", "updated"}:
                         decision = self.ranker.rank(
@@ -298,7 +301,12 @@ class RCAWorker:
                     # reason during ranking. Persist that completed diagnosis.
                     self._persist_incident(connection, event)
                     if decision is not None:
-                        self._replace_rankings(connection, incident, decision.rankings)
+                        self._replace_rankings(
+                            connection,
+                            incident,
+                            decision.rankings,
+                            abstained=decision.abstained,
+)
             connection.commit()
             return len(processed_times)
 
@@ -678,7 +686,11 @@ class RCAWorker:
 
     def _persist_incident(self, connection: Any, event: IncidentEvent) -> Incident:
         incident = event.incident
-        self._identify_incident(incident)
+        if event.action == "opened":
+            # Every later event keeps the id the incident was opened or
+            # restored with: re-deriving it would aim at a different row
+            # whenever the stored id came from another release or time zone.
+            self._identify_incident(incident)
         with connection.cursor() as cursor:
             cursor.execute(
                 """INSERT INTO incidents
@@ -700,7 +712,7 @@ class RCAWorker:
             )
         return incident
 
-    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any]) -> None:
+    def _replace_rankings(self, connection: Any, incident: Incident, rankings: Iterable[Any],*,abstained: bool = False,) -> None:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM evidence_items WHERE incident_id=%s", (incident.id,))
             cursor.execute("DELETE FROM candidate_rankings WHERE incident_id=%s", (incident.id,))
@@ -741,12 +753,21 @@ class RCAWorker:
                             evidence.contribution, _json(evidence.details),
                         ),
                     )
-            self._write_recommendation(cursor, incident, inserted)
+            self._write_recommendation(cursor, incident, inserted, abstained=abstained)
 
     @staticmethod
     def _write_recommendation(
-        cursor: Any, incident: Incident, inserted: Sequence[tuple[Any, int]]
+        cursor: Any,
+        incident: Incident,
+        inserted: Sequence[tuple[Any, int]],
+        *,
+        abstained: bool = False,
     ) -> None:
+        # An inconclusive diagnosis should not receive
+        # a cause-specific runbook recommendation.
+        if abstained:
+            return
+
         actionable = next(
             ((ranking, candidate_id) for ranking, candidate_id in inserted if ranking.entity_id != "inconclusive"),
             None,

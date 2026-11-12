@@ -3,6 +3,9 @@
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
 
 receivers:
   otlp:
@@ -49,6 +52,7 @@ exporters:
       enabled: true
       num_consumers: 4
       queue_size: 10000
+      storage: file_storage
   otlp_http/upstream:
     endpoint: ${env:OTEL_UPSTREAM_ENDPOINT}
     compression: gzip
@@ -62,13 +66,14 @@ exporters:
       enabled: true
       num_consumers: 2
       queue_size: 2000
+      storage: file_storage
   debug:
     verbosity: basic
     sampling_initial: 2
     sampling_thereafter: 500
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, file_storage]
   pipelines:
     traces:
       receivers: [otlp]
