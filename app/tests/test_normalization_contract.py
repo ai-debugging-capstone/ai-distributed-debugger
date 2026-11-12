@@ -142,6 +142,17 @@ def test_nonfinite_resource_attribute_quarantines_only_that_resources_records(si
     assert "nonfinite" not in rows[0]["resource_attributes"]
 
 
+@pytest.mark.parametrize(("value", "text"), [(float("nan"), "NaN"), (float("inf"), "Infinity")])
+def test_nonfinite_number_in_a_log_body_is_stored_as_text(value, text):
+    sample = make_sample("log")
+    sample.item.body.kvlist_value.values.add(key="latency_ms").value.double_value = value
+
+    rows, rejected = sample.normalize(sample.request)
+
+    assert not rejected
+    assert rows[0]["body"] == f'{{"latency_ms": {text}}}'
+
+
 def test_nonfinite_attribute_on_the_first_metric_point_is_quarantined():
     sample = make_sample("metric")
     valid = sample.siblings.add()

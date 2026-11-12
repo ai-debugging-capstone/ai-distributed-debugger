@@ -80,28 +80,38 @@ def bytes_to_hex(value: bytes) -> str | None:
     return value.hex() if value else None
 
 
-def any_value_to_python(value: Any) -> Any:
-    """Convert a protobuf ``AnyValue`` recursively without losing types."""
+def any_value_to_python(value: Any, *, allow_nonfinite: bool = False) -> Any:
+    """Convert a protobuf ``AnyValue`` recursively without losing types.
+
+    NaN and Infinity are rejected by default because attributes are stored as
+    JSONB, which cannot hold them. Text destinations such as a log body opt in.
+    """
 
     kind = value.WhichOneof("value")
     if kind is None:
         return None
     if kind == "array_value":
-        return [any_value_to_python(item) for item in value.array_value.values]
+        return [
+            any_value_to_python(item, allow_nonfinite=allow_nonfinite)
+            for item in value.array_value.values
+        ]
     if kind == "kvlist_value":
-        return key_values_to_dict(value.kvlist_value.values)
+        return key_values_to_dict(value.kvlist_value.values, allow_nonfinite=allow_nonfinite)
     if kind == "bytes_value":
         return value.bytes_value.hex()
     result = getattr(value, kind)
-    if kind == "double_value" and not math.isfinite(result):
+    if kind == "double_value" and not allow_nonfinite and not math.isfinite(result):
         raise ValueError("nonfinite numeric attribute is not allowed")
 
     return result
 
 
-def key_values_to_dict(values: Iterable[Any]) -> dict[str, Any]:
+def key_values_to_dict(values: Iterable[Any], *, allow_nonfinite: bool = False) -> dict[str, Any]:
     # Later duplicate keys intentionally win, matching common SDK behavior.
-    return {item.key: any_value_to_python(item.value) for item in values}
+    return {
+        item.key: any_value_to_python(item.value, allow_nonfinite=allow_nonfinite)
+        for item in values
+    }
 
 
 def _message_to_dict(message: Message) -> dict[str, Any]:
@@ -427,7 +437,8 @@ def normalize_metric_request(request: Any) -> tuple[list[dict[str, Any]], list[d
 
 
 def _body_to_text(body: Any) -> str:
-    value = any_value_to_python(body)
+    # The body is stored as text, where NaN and Infinity serialize safely.
+    value = any_value_to_python(body, allow_nonfinite=True)
     if value is None:
         return ""
     if isinstance(value, str):
