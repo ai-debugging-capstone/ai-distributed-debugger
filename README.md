@@ -512,6 +512,17 @@ docker compose down
 Deleting volumes permanently removes local telemetry, incidents, feedback, and
 dashboard state and is therefore intentionally not part of the normal commands.
 
+Preview log retention without deleting anything. The count covers log records
+older than the retention period that belong to completed or failed experiment
+runs; live telemetry and running experiments are never counted:
+
+```powershell
+docker compose exec rca-worker python -m rca.log_retention --retention-days 30
+```
+
+Without `--retention-days` the preview uses `RCA_LOG_RETENTION_DAYS` (default 30).
+Automated cleanup is not implemented.
+
 ## Safety and scope
 
 - TraceLens is advisory: developers choose and execute remediation.

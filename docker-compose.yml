@@ -99,6 +99,7 @@ services:
       RCA_MIN_INCIDENT_BUCKETS: ${RCA_MIN_INCIDENT_BUCKETS:-2}
       RCA_ANALYSIS_ENGINE: ${RCA_ANALYSIS_ENGINE:-dowhy}
       RCA_MODEL_PATH: ${RCA_MODEL_PATH:-/app/artifacts/champion/model.json}
+      RCA_LOG_RETENTION_DAYS: ${RCA_LOG_RETENTION_DAYS:-30}
     volumes:
       - ./artifacts:/app/artifacts:ro
     depends_on:
