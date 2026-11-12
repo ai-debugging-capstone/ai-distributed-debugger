@@ -116,13 +116,20 @@ services:
     networks:
       - rca-shared
     logging: *default-logging
+
   otel-storage-init:
+    # The Collector runs as UID 10001, but Docker creates a new named volume
+    # owned by root; hand the queue directory over before the gateway starts.
     image: alpine:3.20
     user: "0:0"
     command: ["chown", "10001:10001", "/storage"]
     volumes:
       - otel-gateway-storage:/storage
     restart: "no"
+    networks:
+      - rca-shared
+    logging: *default-logging
+
   otel-gateway:
     image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.160.0
     container_name: rca-otel-gateway
